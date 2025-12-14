@@ -22,5 +22,19 @@
     "default": {
       "default": "assets/moon_walk_t_shirt/moon_walk_t_shirt.jpg"
     }
+  },
+  "alien_drip_t_shirt": {
+    "black": {
+      "glitter": "assets/alien_drip_t_shirt/black_glitter/glitter.jpg",
+      "paint": "assets/alien_drip_t_shirt/black_paint/paint.jpg"
+    },
+    "pink": {
+      "glitter": "assets/alien_drip_t_shirt/pink_glitter/glitter.jpg",
+      "paint": "assets/alien_drip_t_shirt/pink_paint/paint.jpg"
+    },
+    "white": {
+      "glitter": "assets/alien_drip_t_shirt/white_glitter/glitter.jpg",
+      "paint": "assets/alien_drip_t_shirt/white_paint/paint.jpg"
+    }
   }
 }
