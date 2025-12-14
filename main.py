@@ -53,8 +53,8 @@ LOGO_PATH = ASSETS_DIR / "logo.png"
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 
-GEMINI_PRIMARY_MODEL = os.getenv("GEMINI_IMAGE_MODEL", "gemini-3-pro-image-preview").strip()
-GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-2.5-flash-image").strip()
+# ONLY Gemini 3 Pro (no fallback)
+GEMINI_MODEL = os.getenv("GEMINI_IMAGE_MODEL", "gemini-3-pro-image-preview").strip()
 
 IMAGE_SIZE_POLICY = "2K"
 
@@ -107,7 +107,7 @@ def _mime_for_path(p: Path) -> str:
     return "image/png" if p.suffix.lower() == ".png" else "image/jpeg"
 
 
-# ✅ FIX: keyword-only args for google-genai==0.7.0
+# FIX for google-genai==0.7.0 (keyword-only)
 def _part_from_path(p: Path) -> types.Part:
     return types.Part.from_bytes(data=p.read_bytes(), mime_type=_mime_for_path(p))
 
@@ -157,7 +157,7 @@ OUTPUT RESOLUTION POLICY:
 
 
 # =========================
-# Gemini generation (fallback) - SYNC
+# Gemini generation (SYNC) - ONLY 3 PRO
 # =========================
 def gemini_tryon_sync(
     user_photo: Path,
@@ -186,34 +186,21 @@ def gemini_tryon_sync(
         _part_from_path(logo_path),
     ]
 
-    def _run(model: str) -> bytes | None:
-        t0 = time.time()
-        logger.info("Gemini request START | model=%s | policy=%s", model, IMAGE_SIZE_POLICY)
-        resp = client.models.generate_content(model=model, contents=parts)
-        logger.info("Gemini request END   | model=%s | %.2fs", model, time.time() - t0)
+    t0 = time.time()
+    logger.info("Gemini request START | model=%s | policy=%s", GEMINI_MODEL, IMAGE_SIZE_POLICY)
+    resp = client.models.generate_content(model=GEMINI_MODEL, contents=parts)
+    logger.info("Gemini request END   | model=%s | %.2fs", GEMINI_MODEL, time.time() - t0)
 
-        if not getattr(resp, "candidates", None):
-            return None
-        cand = resp.candidates[0]
-        for part in cand.content.parts:
-            inline = getattr(part, "inline_data", None)
-            if inline and getattr(inline, "data", None):
-                return inline.data
-        return None
+    if not getattr(resp, "candidates", None):
+        raise RuntimeError("Gemini returned no candidates")
 
-    # primary
-    try:
-        out = _run(GEMINI_PRIMARY_MODEL)
-        if out:
-            return out, GEMINI_PRIMARY_MODEL
-        logger.warning("Primary returned no image bytes → fallback")
-    except Exception as e:
-        logger.warning("Primary failed → fallback | err=%s", e)
+    cand = resp.candidates[0]
+    for part in cand.content.parts:
+        inline = getattr(part, "inline_data", None)
+        if inline and getattr(inline, "data", None):
+            return inline.data, GEMINI_MODEL
 
-    out = _run(GEMINI_FALLBACK_MODEL)
-    if not out:
-        raise RuntimeError("Both Gemini models failed (no image bytes).")
-    return out, GEMINI_FALLBACK_MODEL
+    raise RuntimeError("Gemini returned no image bytes (text-only response)")
 
 
 # =========================
@@ -303,7 +290,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("logo.png не найден в assets/. Добавь logo.png.")
             return
 
-        await query.edit_message_text("Генерирую (2K, Gemini)…")
+        await query.edit_message_text(f"Генерирую (2K, {GEMINI_MODEL})…")
 
         try:
             loop = asyncio.get_running_loop()
@@ -356,10 +343,9 @@ def main():
     app.add_handler(CallbackQueryHandler(on_callback))
 
     logger.info("Bot started (Background Worker, polling)")
-    logger.info("Gemini primary=%s | fallback=%s | policy=%s",
-                GEMINI_PRIMARY_MODEL, GEMINI_FALLBACK_MODEL, IMAGE_SIZE_POLICY)
+    logger.info("Gemini model=%s | policy=%s", GEMINI_MODEL, IMAGE_SIZE_POLICY)
 
-    # guarantee polling mode and clear pending updates
+    # IMPORTANT: ensure polling mode and clear pending webhook/updates
     app.bot.delete_webhook(drop_pending_updates=True)
 
     app.run_polling(allowed_updates=Update.ALL_TYPES)
