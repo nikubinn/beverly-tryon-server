@@ -5,14 +5,11 @@ import tempfile
 import time
 import atexit
 import fcntl
+import asyncio
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-)
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
     CallbackQueryHandler,
@@ -36,10 +33,6 @@ from prompts import GLOBAL_CONSTRAINTS, GLOBAL_QUALITY, PRODUCT_PROMPTS
 _lock_fh = None
 
 def acquire_single_instance_lock():
-    """
-    Prevents double polling within the same host/container.
-    Helps avoid telegram.error.Conflict during deploy/restart races.
-    """
     global _lock_fh
     _lock_fh = open("/tmp/telegram_polling.lock", "w")
     try:
@@ -60,11 +53,9 @@ LOGO_PATH = ASSETS_DIR / "logo.png"
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 
-# Models
 GEMINI_PRIMARY_MODEL = os.getenv("GEMINI_IMAGE_MODEL", "gemini-3-pro-image-preview").strip()
 GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-2.5-flash-image").strip()
 
-# Policy
 IMAGE_SIZE_POLICY = "2K"
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -100,10 +91,7 @@ def load_catalog() -> Dict[str, Any]:
 
 
 def build_keyboard(items, prefix: str, row: int = 2, extra_buttons=None):
-    buttons = [
-        InlineKeyboardButton(text=str(it), callback_data=f"{prefix}{it}")
-        for it in items
-    ]
+    buttons = [InlineKeyboardButton(text=str(it), callback_data=f"{prefix}{it}") for it in items]
     keyboard = [buttons[i:i + row] for i in range(0, len(buttons), row)]
     if extra_buttons:
         keyboard += extra_buttons
@@ -131,7 +119,6 @@ def build_tryon_prompt(tshirt: str, color: str, pr: str) -> str:
     color_rule = (product.get("colors", {}).get(color) or "").strip()
     print_rule = (product.get("prints", {}).get(pr) or "").strip()
 
-    # никаких ключевых слов/режимов — просто правила
     return f"""
 You will edit the FIRST image (the person photo).
 
@@ -169,7 +156,7 @@ OUTPUT RESOLUTION POLICY:
 
 
 # =========================
-# Gemini generation (fallback)
+# Gemini generation (fallback) - SYNC
 # =========================
 def gemini_tryon_sync(
     user_photo: Path,
@@ -179,10 +166,6 @@ def gemini_tryon_sync(
     color: str,
     pr: str,
 ) -> Tuple[bytes, str]:
-    """
-    SYNC function (runs in executor).
-    Returns (image_bytes, model_used).
-    """
     if not GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY is missing")
     if not user_photo.exists():
@@ -204,17 +187,12 @@ def gemini_tryon_sync(
 
     def _run(model: str) -> bytes | None:
         t0 = time.time()
-        logger.info("Gemini request START | model=%s | size=%s", model, IMAGE_SIZE_POLICY)
-        resp = client.models.generate_content(
-            model=model,
-            contents=parts,
-        )
-        dt = time.time() - t0
-        logger.info("Gemini request END   | model=%s | %.2fs", model, dt)
+        logger.info("Gemini request START | model=%s | policy=%s", model, IMAGE_SIZE_POLICY)
+        resp = client.models.generate_content(model=model, contents=parts)
+        logger.info("Gemini request END   | model=%s | %.2fs", model, time.time() - t0)
 
         if not getattr(resp, "candidates", None):
             return None
-
         cand = resp.candidates[0]
         for part in cand.content.parts:
             inline = getattr(part, "inline_data", None)
@@ -222,7 +200,7 @@ def gemini_tryon_sync(
                 return inline.data
         return None
 
-    # Primary
+    # primary
     try:
         out = _run(GEMINI_PRIMARY_MODEL)
         if out:
@@ -231,7 +209,6 @@ def gemini_tryon_sync(
     except Exception as e:
         logger.warning("Primary failed → fallback | err=%s", e)
 
-    # Fallback
     out = _run(GEMINI_FALLBACK_MODEL)
     if not out:
         raise RuntimeError("Both Gemini models failed (no image bytes).")
@@ -299,11 +276,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith(CB_COLOR):
         color = data[len(CB_COLOR):]
         tshirt = context.user_data.get(K_TSHIRT)
-        if not tshirt:
-            await query.edit_message_text("Сначала выбери футболку.")
-            return
-        if color not in catalog[tshirt]:
-            await query.edit_message_text("Не понял цвет. Попробуй ещё раз.")
+        if not tshirt or color not in catalog.get(tshirt, {}):
+            await query.edit_message_text("Сначала выбери футболку, затем цвет.")
             return
         context.user_data[K_COLOR] = color
         kb = build_keyboard(sorted(catalog[tshirt][color].keys()), CB_PRINT)
@@ -331,8 +305,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Генерирую (2K, Gemini)…")
 
         try:
-            # run sync gemini in executor (non-blocking for Telegram loop)
-            out_bytes, model_used = await context.application.run_in_executor(
+            loop = asyncio.get_running_loop()
+            out_bytes, model_used = await loop.run_in_executor(
                 None,
                 lambda: gemini_tryon_sync(
                     user_photo=user_photo_path,
@@ -383,7 +357,7 @@ def main():
     logger.info("Bot started (Background Worker, polling)")
     logger.info("Gemini primary=%s | fallback=%s | policy=%s", GEMINI_PRIMARY_MODEL, GEMINI_FALLBACK_MODEL, IMAGE_SIZE_POLICY)
 
-    # гарантия polling-режима и чистка очереди
+    # guarantee polling mode and clear pending updates
     app.bot.delete_webhook(drop_pending_updates=True)
 
     app.run_polling(allowed_updates=Update.ALL_TYPES)
