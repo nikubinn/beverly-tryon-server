@@ -53,8 +53,8 @@ LOGO_PATH = ASSETS_DIR / "logo.png"
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 
-# ONLY Gemini 3 Pro (no fallback)
-GEMINI_MODEL = os.getenv("GEMINI_IMAGE_MODEL", "gemini-3-pro-image-preview").strip()
+# ONLY Gemini 3 Pro (hardcoded, ignore env)
+GEMINI_MODEL = "gemini-3-pro-image"
 
 IMAGE_SIZE_POLICY = "2K"
 
