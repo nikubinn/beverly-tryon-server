@@ -6,7 +6,6 @@ import time
 import atexit
 import fcntl
 import asyncio
-import io
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
@@ -67,10 +66,36 @@ logger = logging.getLogger("beverly-tryon-bot")
 
 
 # =========================
+# UI LABELS / DISPLAY MAPS
+# =========================
+TSHIRT_LABELS = {
+    "alien_drip_t_shirt": "[ ALIEN DRIP T-SHIRT ]",
+    "moon_walk_t_shirt": "[ MOON WALK T-SHIRT ]",
+    "pink_swaga_t_shirt": "[ PINK SWAGA T-SHIRT ]",
+    "pocket_t_shirt": "[ POCKET T-SHIRT ]",
+}
+
+COLOR_LABELS = {
+    "black": "[ BLACK ]",
+    "pink": "[ PINK ]",
+    "white": "[ WHITE ]",
+}
+
+RESTART_LABEL = "[ ↻ ЗАНОВО ]"
+
+TEXT_PHOTO_OK = "ага 🟣✅\n[ ВЫБЕРИ ФУТБОЛКУ ]"
+TEXT_PICK_COLOR = "[ ВЫБЕРИ ЦВЕТ ]"
+TEXT_PICK_PRINT = "[ ВЫБЕРИ ПРИНТ ]"
+TEXT_TRYON = "идёт примерка 👽"
+TEXT_DONE = "готово 🦇"
+
+
+# =========================
 # STATE KEYS
 # =========================
 K_USER_PHOTO = "user_photo_path"
-K_ORIG_SIZE = "orig_size"  # (W, H)
+K_ORIG_W = "orig_w"
+K_ORIG_H = "orig_h"
 
 K_TSHIRT = "sel_tshirt"
 K_COLOR = "sel_color"
@@ -92,9 +117,10 @@ def load_catalog() -> Dict[str, Any]:
         return json.load(f)
 
 
-def build_keyboard(items, prefix: str, row: int = 2, extra_buttons=None):
+def build_keyboard(items, prefix: str, row: int = 2, label_map=None, extra_buttons=None):
+    label_map = label_map or {}
     buttons = [
-        InlineKeyboardButton(text=str(it), callback_data=f"{prefix}{it}")
+        InlineKeyboardButton(text=label_map.get(str(it), str(it)), callback_data=f"{prefix}{it}")
         for it in items
     ]
     keyboard = [buttons[i:i + row] for i in range(0, len(buttons), row)]
@@ -119,37 +145,39 @@ def _part_from_path(p: Path) -> types.Part:
     )
 
 
-def cover_crop_to_size(img: Image.Image, target_size: tuple[int, int]) -> Image.Image:
-    """
-    Без рамок: сохраняем пропорции (без растяжения), но заполняем весь target,
-    обрезая лишнее по краям (COVER + center crop).
-    """
-    target_w, target_h = target_size
-    src_w, src_h = img.size
+def _label_print(pr: str) -> str:
+    return f"[ {str(pr).replace('_', ' ').upper()} ]"
 
-    scale = max(target_w / src_w, target_h / src_h)  # COVER
-    new_w = int(src_w * scale)
-    new_h = int(src_h * scale)
 
-    img = img.resize((new_w, new_h), Image.LANCZOS)
+def _label_tshirt(t: str) -> str:
+    return TSHIRT_LABELS.get(t, f"[ {str(t).replace('_', ' ').upper()} ]")
 
-    left = (new_w - target_w) // 2
-    top = (new_h - target_h) // 2
-    return img.crop((left, top, left + target_w, top + target_h))
+
+def _label_color(c: str) -> str:
+    return COLOR_LABELS.get(c, f"[ {str(c).replace('_', ' ').upper()} ]")
 
 
 # =========================
-# PROMPT BUILDER (NO LOGO)
+# PROMPT BUILDER (NO LOGO) + HARD CANVAS LOCK
 # =========================
-def build_tryon_prompt(tshirt: str, color: str, pr: str) -> str:
+def build_tryon_prompt(tshirt: str, color: str, pr: str, orig_w: int, orig_h: int) -> str:
     product = PRODUCT_PROMPTS.get(tshirt, {})
+    ratio = (orig_w / orig_h) if orig_h else 0.0
+
     return f"""
 You will edit the FIRST image (the person photo).
 
 PRIMARY TASK:
-- Replace ONLY the T-shirt on the person using the SECOND image as reference.
-- Match color, print placement, scale, orientation exactly.
-- Keep everything else unchanged.
+- Replace ONLY the T-shirt on the person using the SECOND image as the exact reference.
+- Match color, print placement, scale, and orientation exactly.
+- Keep EVERYTHING else pixel-identical (background, face, hands, phone, tattoos, lighting).
+
+CANVAS LOCK (STRICT, NO EXCEPTIONS):
+- Output MUST keep the same canvas size and aspect ratio as the FIRST image.
+- Do NOT crop, zoom, square, extend borders, add margins, add frames, or reframe.
+- Output pixel dimensions must be EXACTLY: {orig_w} x {orig_h}.
+- Aspect ratio must be EXACTLY: {ratio:.6f}.
+- If you are unsure, preserve the FIRST image framing and canvas unchanged.
 
 {GLOBAL_CONSTRAINTS}
 {GLOBAL_QUALITY}
@@ -167,8 +195,8 @@ PRINT SPEC:
 {product.get("prints", {}).get(pr, "")}
 
 OUTPUT:
-- ONE image
-- ~2048px longest side (2K)
+- Generate ONE image only.
+- Keep the same size as input ({orig_w}x{orig_h}).
 """.strip()
 
 
@@ -181,10 +209,12 @@ def gemini_tryon_sync(
     tshirt: str,
     color: str,
     pr: str,
+    orig_w: int,
+    orig_h: int,
 ) -> Tuple[bytes, str]:
 
     client = genai.Client(api_key=GEMINI_API_KEY)
-    prompt = build_tryon_prompt(tshirt, color, pr)
+    prompt = build_tryon_prompt(tshirt, color, pr, orig_w, orig_h)
 
     parts = [
         prompt,
@@ -192,7 +222,7 @@ def gemini_tryon_sync(
         _part_from_path(asset_path),
     ]
 
-    logger.info("Gemini START | model=%s", GEMINI_MODEL)
+    logger.info("Gemini START | model=%s | input=%sx%s", GEMINI_MODEL, orig_w, orig_h)
     t0 = time.time()
     resp = client.models.generate_content(model=GEMINI_MODEL, contents=parts)
     logger.info("Gemini END | %.2fs", time.time() - t0)
@@ -211,7 +241,7 @@ def gemini_tryon_sync(
 # =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reset_flow(context)
-    await update.message.reply_text("Пришли фото — выберем футболку 👕")
+    await update.message.reply_text("Пришли фото 📸")
 
 
 async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -222,23 +252,30 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_path = tmp / f"user_{update.effective_user.id}.jpg"
     await file.download_to_drive(custom_path=str(user_path))
 
-    # Save original size (W, H) so we can return same aspect ratio w/o рамок
+    # store original size for strict prompt constraints
     try:
         with Image.open(user_path) as im:
-            context.user_data[K_ORIG_SIZE] = im.size
+            w, h = im.size
+        context.user_data[K_ORIG_W] = int(w)
+        context.user_data[K_ORIG_H] = int(h)
     except Exception:
-        context.user_data.pop(K_ORIG_SIZE, None)
+        context.user_data[K_ORIG_W] = 0
+        context.user_data[K_ORIG_H] = 0
 
     context.user_data[K_USER_PHOTO] = str(user_path)
     reset_flow(context)
 
     catalog = context.bot_data["catalog"]
+    tshirts = sorted(catalog.keys())
+
     kb = build_keyboard(
-        sorted(catalog.keys()),
+        tshirts,
         CB_TSHIRT,
-        extra_buttons=[[InlineKeyboardButton("↻ заново", callback_data=CB_RESTART)]],
+        label_map={k: _label_tshirt(k) for k in tshirts},
+        extra_buttons=[[InlineKeyboardButton(RESTART_LABEL, callback_data=CB_RESTART)]],
     )
-    await update.message.reply_text("Фото принято ✅\nВыбери футболку:", reply_markup=kb)
+
+    await update.message.reply_text(TEXT_PHOTO_OK, reply_markup=kb)
 
 
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -249,8 +286,14 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == CB_RESTART:
         reset_flow(context)
-        kb = build_keyboard(sorted(catalog.keys()), CB_TSHIRT)
-        await query.edit_message_text("Заново. Выбери футболку:", reply_markup=kb)
+        tshirts = sorted(catalog.keys())
+        kb = build_keyboard(
+            tshirts,
+            CB_TSHIRT,
+            label_map={k: _label_tshirt(k) for k in tshirts},
+            extra_buttons=[[InlineKeyboardButton(RESTART_LABEL, callback_data=CB_RESTART)]],
+        )
+        await query.edit_message_text(TEXT_PHOTO_OK, reply_markup=kb)
         return
 
     user_photo = context.user_data.get(K_USER_PHOTO)
@@ -260,58 +303,103 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith(CB_TSHIRT):
         tshirt = data[len(CB_TSHIRT):]
+        if tshirt not in catalog:
+            await query.edit_message_text("Не понял выбор. Нажми /start и попробуй снова.")
+            return
+
         context.user_data[K_TSHIRT] = tshirt
-        kb = build_keyboard(sorted(catalog[tshirt].keys()), CB_COLOR)
-        await query.edit_message_text("Выбери цвет:", reply_markup=kb)
+        colors = sorted(catalog[tshirt].keys())
+
+        kb = build_keyboard(
+            colors,
+            CB_COLOR,
+            label_map={c: _label_color(c) for c in colors},
+            row=2,
+        )
+        await query.edit_message_text(TEXT_PICK_COLOR, reply_markup=kb)
         return
 
     if data.startswith(CB_COLOR):
         color = data[len(CB_COLOR):]
+        tshirt = context.user_data.get(K_TSHIRT)
+        if not tshirt or color not in catalog.get(tshirt, {}):
+            await query.edit_message_text("Сначала выбери футболку, затем цвет.")
+            return
+
         context.user_data[K_COLOR] = color
-        kb = build_keyboard(sorted(catalog[context.user_data[K_TSHIRT]][color].keys()), CB_PRINT)
-        await query.edit_message_text("Выбери принт:", reply_markup=kb)
+        prints = sorted(catalog[tshirt][color].keys())
+
+        kb = build_keyboard(
+            prints,
+            CB_PRINT,
+            label_map={p: _label_print(p) for p in prints},
+            row=2,
+        )
+        await query.edit_message_text(TEXT_PICK_PRINT, reply_markup=kb)
         return
 
     if data.startswith(CB_PRINT):
         pr = data[len(CB_PRINT):]
+        tshirt = context.user_data.get(K_TSHIRT)
+        color = context.user_data.get(K_COLOR)
+
+        if not tshirt or not color:
+            await query.edit_message_text("Сначала выбери футболку и цвет.")
+            return
+        if pr not in catalog[tshirt][color]:
+            await query.edit_message_text("Не понял принт. Попробуй ещё раз.")
+            return
+
         context.user_data[K_PRINT] = pr
 
-        await query.edit_message_text("Генерирую (2K)…")
+        await query.edit_message_text(TEXT_TRYON)
 
-        loop = asyncio.get_running_loop()
-        out_bytes, model_used = await loop.run_in_executor(
-            None,
-            lambda: gemini_tryon_sync(
-                Path(user_photo),
-                BASE_DIR / catalog[context.user_data[K_TSHIRT]][context.user_data[K_COLOR]][pr],
-                context.user_data[K_TSHIRT],
-                context.user_data[K_COLOR],
-                pr,
-            ),
-        )
+        asset_path = BASE_DIR / catalog[tshirt][color][pr]
+        user_photo_path = Path(user_photo)
 
-        # Crop to original aspect ratio/size WITHOUT borders
-        orig_size = context.user_data.get(K_ORIG_SIZE)
-        if orig_size:
-            img = Image.open(io.BytesIO(out_bytes)).convert("RGB")
-            img = cover_crop_to_size(img, orig_size)
-            with tempfile.NamedTemporaryFile(suffix=".jpg") as f:
-                img.save(f.name, format="JPEG", quality=95, subsampling=0)
-                await context.bot.send_photo(
-                    chat_id=update.effective_chat.id,
-                    photo=f.name,
-                    caption=f"Готово ✅\n{model_used} | 2K | crop",
+        orig_w = int(context.user_data.get(K_ORIG_W, 0) or 0)
+        orig_h = int(context.user_data.get(K_ORIG_H, 0) or 0)
+
+        try:
+            loop = asyncio.get_running_loop()
+            out_bytes, model_used = await loop.run_in_executor(
+                None,
+                lambda: gemini_tryon_sync(
+                    user_photo=user_photo_path,
+                    asset_path=asset_path,
+                    tshirt=tshirt,
+                    color=color,
+                    pr=pr,
+                    orig_w=orig_w,
+                    orig_h=orig_h,
                 )
-        else:
-            # Fallback: send as-is
+            )
+
+            caption = (
+                f"{TEXT_DONE}\n"
+                f"{_label_tshirt(tshirt)}\n"
+                f"{_label_color(color)}\n"
+                f"{_label_print(pr)}"
+            )
+
             with tempfile.NamedTemporaryFile(suffix=".jpg") as f:
                 f.write(out_bytes)
                 f.flush()
                 await context.bot.send_photo(
                     chat_id=update.effective_chat.id,
                     photo=f.name,
-                    caption=f"Готово ✅\n{model_used} | 2K",
+                    caption=caption,
                 )
+
+        except Exception as e:
+            logger.exception("Generation failed")
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=f"Ошибка генерации: {e}",
+            )
+        return
+
+    await query.edit_message_text("Неизвестная команда. Нажми /start и попробуй снова.")
 
 
 # =========================
