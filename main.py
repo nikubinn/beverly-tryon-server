@@ -2,6 +2,9 @@ import json
 import logging
 import os
 import tempfile
+import time
+import atexit
+import fcntl
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
@@ -28,6 +31,25 @@ from prompts import GLOBAL_CONSTRAINTS, GLOBAL_QUALITY, PRODUCT_PROMPTS
 
 
 # =========================
+# Single instance lock (Telegram polling safety)
+# =========================
+_lock_fh = None
+
+def acquire_single_instance_lock():
+    """
+    Prevents double polling within the same host/container.
+    Helps avoid telegram.error.Conflict during deploy/restart races.
+    """
+    global _lock_fh
+    _lock_fh = open("/tmp/telegram_polling.lock", "w")
+    try:
+        fcntl.flock(_lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        raise SystemExit("Another Telegram bot instance is already running (lockfile).")
+    atexit.register(lambda: _lock_fh.close())
+
+
+# =========================
 # Paths & config
 # =========================
 BASE_DIR = Path(__file__).resolve().parent
@@ -39,15 +61,8 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 
 # Models
-GEMINI_PRIMARY_MODEL = os.getenv(
-    "GEMINI_IMAGE_MODEL",
-    "gemini-3-pro-image-preview"
-).strip()
-
-GEMINI_FALLBACK_MODEL = os.getenv(
-    "GEMINI_FALLBACK_MODEL",
-    "gemini-2.5-flash-image"
-).strip()
+GEMINI_PRIMARY_MODEL = os.getenv("GEMINI_IMAGE_MODEL", "gemini-3-pro-image-preview").strip()
+GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-2.5-flash-image").strip()
 
 # Policy
 IMAGE_SIZE_POLICY = "2K"
@@ -78,6 +93,8 @@ CB_RESTART = "restart"
 # Helpers
 # =========================
 def load_catalog() -> Dict[str, Any]:
+    if not CATALOG_PATH.exists():
+        raise FileNotFoundError(f"catalog.json not found at: {CATALOG_PATH}")
     with CATALOG_PATH.open("r", encoding="utf-8") as f:
         return json.load(f)
 
@@ -114,6 +131,7 @@ def build_tryon_prompt(tshirt: str, color: str, pr: str) -> str:
     color_rule = (product.get("colors", {}).get(color) or "").strip()
     print_rule = (product.get("prints", {}).get(pr) or "").strip()
 
+    # никаких ключевых слов/режимов — просто правила
     return f"""
 You will edit the FIRST image (the person photo).
 
@@ -153,7 +171,7 @@ OUTPUT RESOLUTION POLICY:
 # =========================
 # Gemini generation (fallback)
 # =========================
-def gemini_tryon(
+def gemini_tryon_sync(
     user_photo: Path,
     asset_path: Path,
     logo_path: Path,
@@ -161,6 +179,18 @@ def gemini_tryon(
     color: str,
     pr: str,
 ) -> Tuple[bytes, str]:
+    """
+    SYNC function (runs in executor).
+    Returns (image_bytes, model_used).
+    """
+    if not GEMINI_API_KEY:
+        raise RuntimeError("GEMINI_API_KEY is missing")
+    if not user_photo.exists():
+        raise FileNotFoundError(f"User photo not found: {user_photo}")
+    if not asset_path.exists():
+        raise FileNotFoundError(f"Asset not found: {asset_path}")
+    if not logo_path.exists():
+        raise FileNotFoundError(f"Logo not found: {logo_path}")
 
     client = genai.Client(api_key=GEMINI_API_KEY)
     prompt = build_tryon_prompt(tshirt, color, pr)
@@ -173,15 +203,22 @@ def gemini_tryon(
     ]
 
     def _run(model: str) -> bytes | None:
+        t0 = time.time()
+        logger.info("Gemini request START | model=%s | size=%s", model, IMAGE_SIZE_POLICY)
         resp = client.models.generate_content(
             model=model,
             contents=parts,
         )
-        if not resp.candidates:
+        dt = time.time() - t0
+        logger.info("Gemini request END   | model=%s | %.2fs", model, dt)
+
+        if not getattr(resp, "candidates", None):
             return None
-        for part in resp.candidates[0].content.parts:
+
+        cand = resp.candidates[0]
+        for part in cand.content.parts:
             inline = getattr(part, "inline_data", None)
-            if inline and inline.data:
+            if inline and getattr(inline, "data", None):
                 return inline.data
         return None
 
@@ -190,15 +227,14 @@ def gemini_tryon(
         out = _run(GEMINI_PRIMARY_MODEL)
         if out:
             return out, GEMINI_PRIMARY_MODEL
-        logger.warning("Primary returned no image, fallback")
+        logger.warning("Primary returned no image bytes → fallback")
     except Exception as e:
-        logger.warning("Primary failed: %s", e)
+        logger.warning("Primary failed → fallback | err=%s", e)
 
     # Fallback
     out = _run(GEMINI_FALLBACK_MODEL)
     if not out:
-        raise RuntimeError("Both Gemini models failed")
-
+        raise RuntimeError("Both Gemini models failed (no image bytes).")
     return out, GEMINI_FALLBACK_MODEL
 
 
@@ -207,12 +243,13 @@ def gemini_tryon(
 # =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reset_flow(context)
-    await update.message.reply_text(
-        "Привет! Пришли своё фото — выберем футболку, цвет и принт."
-    )
+    await update.message.reply_text("Привет! Пришли своё фото — выберем футболку, цвет и принт.")
 
 
 async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.photo:
+        return
+
     photo = update.message.photo[-1]
     file = await photo.get_file()
 
@@ -251,6 +288,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith(CB_TSHIRT):
         tshirt = data[len(CB_TSHIRT):]
+        if tshirt not in catalog:
+            await query.edit_message_text("Не понял выбор футболки. Попробуй ещё раз.")
+            return
         context.user_data[K_TSHIRT] = tshirt
         kb = build_keyboard(sorted(catalog[tshirt].keys()), CB_COLOR)
         await query.edit_message_text("Выбери цвет:", reply_markup=kb)
@@ -258,43 +298,81 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith(CB_COLOR):
         color = data[len(CB_COLOR):]
+        tshirt = context.user_data.get(K_TSHIRT)
+        if not tshirt:
+            await query.edit_message_text("Сначала выбери футболку.")
+            return
+        if color not in catalog[tshirt]:
+            await query.edit_message_text("Не понял цвет. Попробуй ещё раз.")
+            return
         context.user_data[K_COLOR] = color
-        tshirt = context.user_data[K_TSHIRT]
         kb = build_keyboard(sorted(catalog[tshirt][color].keys()), CB_PRINT)
         await query.edit_message_text("Выбери принт:", reply_markup=kb)
         return
 
     if data.startswith(CB_PRINT):
         pr = data[len(CB_PRINT):]
-        tshirt = context.user_data[K_TSHIRT]
-        color = context.user_data[K_COLOR]
+        tshirt = context.user_data.get(K_TSHIRT)
+        color = context.user_data.get(K_COLOR)
+        if not tshirt or not color:
+            await query.edit_message_text("Сначала выбери футболку и цвет.")
+            return
+        if pr not in catalog[tshirt][color]:
+            await query.edit_message_text("Не понял принт. Попробуй ещё раз.")
+            return
 
         asset_path = BASE_DIR / catalog[tshirt][color][pr]
         user_photo_path = Path(user_photo)
 
+        if not LOGO_PATH.exists():
+            await query.edit_message_text("logo.png не найден в assets/. Добавь logo.png.")
+            return
+
         await query.edit_message_text("Генерирую (2K, Gemini)…")
 
-        out_bytes, model_used = gemini_tryon(
-            user_photo_path,
-            asset_path,
-            LOGO_PATH,
-            tshirt,
-            color,
-            pr,
-        )
-
-        with tempfile.NamedTemporaryFile(suffix=".jpg") as f:
-            f.write(out_bytes)
-            f.flush()
-            await context.bot.send_photo(
-                chat_id=update.effective_chat.id,
-                photo=f.name,
-                caption=f"Готово ✅\n{tshirt} / {color} / {pr}\n{model_used} | 2K",
+        try:
+            # run sync gemini in executor (non-blocking for Telegram loop)
+            out_bytes, model_used = await context.application.run_in_executor(
+                None,
+                lambda: gemini_tryon_sync(
+                    user_photo=user_photo_path,
+                    asset_path=asset_path,
+                    logo_path=LOGO_PATH,
+                    tshirt=tshirt,
+                    color=color,
+                    pr=pr,
+                )
             )
+
+            with tempfile.NamedTemporaryFile(suffix=".jpg") as f:
+                f.write(out_bytes)
+                f.flush()
+                await context.bot.send_photo(
+                    chat_id=update.effective_chat.id,
+                    photo=f.name,
+                    caption=f"Готово ✅\n{tshirt} / {color} / {pr}\n{model_used} | 2K",
+                )
+        except Exception as e:
+            logger.exception("Generation failed")
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=f"Ошибка генерации: {e}",
+            )
+        return
+
+    await query.edit_message_text("Неизвестная команда. Нажми /start и попробуй снова.")
 
 
 def main():
+    acquire_single_instance_lock()
+
+    if not TELEGRAM_TOKEN:
+        raise RuntimeError("TELEGRAM_TOKEN is not set in environment variables")
+    if not GEMINI_API_KEY:
+        raise RuntimeError("GEMINI_API_KEY is not set in environment variables")
+
     catalog = load_catalog()
+
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.bot_data["catalog"] = catalog
 
@@ -303,7 +381,12 @@ def main():
     app.add_handler(CallbackQueryHandler(on_callback))
 
     logger.info("Bot started (Background Worker, polling)")
-    app.run_polling()
+    logger.info("Gemini primary=%s | fallback=%s | policy=%s", GEMINI_PRIMARY_MODEL, GEMINI_FALLBACK_MODEL, IMAGE_SIZE_POLICY)
+
+    # гарантия polling-режима и чистка очереди
+    app.bot.delete_webhook(drop_pending_updates=True)
+
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
