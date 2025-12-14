@@ -1,6 +1,6 @@
 # prompts.py
-# Detailed per-product descriptors for try-on (Gemini Image Edit).
-# These are INTERNAL instructions; model + resolution + logo rules live in main.py.
+# Internal prompt descriptors for try-on (Gemini Image Edit)
+# Keys MUST match catalog.json exactly.
 
 GLOBAL_CONSTRAINTS = """
 HARD CONSTRAINTS (must follow):
@@ -18,8 +18,6 @@ QUALITY TARGET:
 - Print follows fabric folds subtly (only mild warping from real drape), never floating.
 """
 
-# Helper: if some print keys vary in your catalog.json (e.g. "pink_glitter" vs "glitter"),
-# keep the keys here exactly as your catalog uses them.
 PRODUCT_PROMPTS = {
 
   # =========================
@@ -35,38 +33,36 @@ GARMENT DNA:
 """,
     "placement_dna": """
 PRINT PLACEMENT DNA:
-- Main graphic centered on chest.
-- Scale: large statement print, but not touching collar.
+- Main alien-eyes graphic centered on the chest.
+- Scale: large statement print, not touching the collar.
 - Keep symmetry left/right.
 - Preserve exact print proportions from reference.
 """,
     "colors": {
-      "black": """
-COLOR RULE:
-- Deep black fabric, not washed-out grey.
-- Preserve natural highlights in folds; do not over-sharpen.
-"""
+      "black": "COLOR RULE: deep black fabric, keep natural highlights in folds.",
+      "white": "COLOR RULE: clean bright white fabric, keep natural shadows in folds, no yellow tint.",
+      "pink":  "COLOR RULE: pastel pink fabric tone, even and premium, do not tint skin."
     },
     "prints": {
       "paint": """
 PRINT DNA (PAINT):
-- Two alien-eye shapes on chest, white paint style with dripping trails.
-- Matte paint, slightly organic edges like real dried paint.
+- Two alien-eye shapes on chest with dripping trails.
+- Matte paint look, slightly organic edges like real dried paint.
 - Drips must match reference direction and length (no extra random drips).
-- Strong contrast: clean white over black, premium look.
+- Keep high contrast and clean premium finish.
 """,
       "glitter": """
 PRINT DNA (GLITTER):
-- Two alien-eye shapes on chest, metallic silver glitter with dripping trails.
-- Glitter is dense and premium. Controlled sparkle (not noisy grain).
-- Highlights respond to scene lighting subtly; keep shapes readable.
+- Two alien-eye shapes on chest with dripping trails.
+- Metallic glitter texture, dense and premium. Controlled sparkle (not noisy grain).
+- Highlights respond to lighting subtly; keep shapes readable.
 - Drips remain sharp and defined (no blur).
 """
     }
   },
 
   # =========================
-  # POCKET T-SHIRT (UTILITY + BEVERLY ARCH)
+  # POCKET T-SHIRT
   # =========================
   "pocket_t_shirt": {
     "garment_dna": """
@@ -83,16 +79,8 @@ PRINT PLACEMENT DNA:
 - Print should not wrap unnaturally around torso; only mild fold-following.
 """,
     "colors": {
-      "black": """
-COLOR RULE:
-- Deep black fabric.
-- Keep sleeve pocket detail readable (do not smear).
-""",
-      "white": """
-COLOR RULE:
-- Clean bright white fabric, not grey/yellow.
-- Preserve natural shadows in folds.
-"""
+      "black": "COLOR RULE: deep black fabric; keep sleeve pocket detail readable.",
+      "white": "COLOR RULE: clean bright white fabric; preserve natural shadows."
     },
     "prints": {
       "paint": """
@@ -118,39 +106,30 @@ PRINT DNA (PINK GLITTER):
 
   # =========================
   # PINK SWAGA T-SHIRT
+  # catalog has print key: "stripes" and color defines which variant image is used
   # =========================
   "pink_swaga_t_shirt": {
     "garment_dna": """
 GARMENT DNA:
-- Oversized pastel pink T-shirt, soft cotton, relaxed streetwear fit.
-- Clean crew neck collar, smooth fabric surface.
-- Keep pink tone consistent with reference (no random saturation shifts).
+- Oversized T-shirt, relaxed streetwear fit.
+- Clean crew neck collar, smooth cotton surface, premium finish.
 """,
     "placement_dna": """
 GRAPHIC PLACEMENT DNA:
-- Scattered organic black blob/stripe shapes across front like patches/appliqué.
-- Distribution and size must match reference; do not invent new blobs.
-- Shapes should look intentionally placed, not random noise.
+- Scattered organic black blob/stripe shapes across the shirt like appliqué patches.
+- Distribution and size must match the reference exactly; do not invent new blobs.
+- Shapes must look intentionally placed, not random noise.
 """,
     "colors": {
-      "pink": """
-COLOR RULE:
-- Pastel pink base fabric. Smooth, even tone.
-- Preserve realistic shading in folds; do not tint skin.
-"""
+      "pink":  "COLOR RULE: pastel pink base fabric, even tone, do not tint skin.",
+      "white": "COLOR RULE: clean white base fabric, preserve natural shadows."
     },
     "prints": {
-      "pink_stripes": """
-PRINT DNA:
-- Black blobs/stripes with a pink outline/trim (stitched edge feel).
-- Outline thickness consistent, edges crisp.
-- High quality appliqué look, no blur.
-""",
-      "white_stripes": """
-PRINT DNA:
-- Black blobs/stripes with a white outline/trim (stitched edge feel).
-- High contrast, outline thickness consistent, edges crisp.
-- No extra marks beyond reference.
+      "stripes": """
+PRINT DNA (STRIPES/BLOBS):
+- Organic black blobs/stripes with an outline/trim that matches the reference image for this selected color.
+- Outline must be clean, consistent thickness, crisp edges.
+- High-quality patch/appliqué look, no blur.
 """
     }
   },
@@ -163,7 +142,7 @@ PRINT DNA:
 GARMENT DNA:
 - Oversized black T-shirt, premium minimal aesthetic.
 - Heavy cotton jersey, realistic folds, clean collar.
-- No large front logos or text.
+- No large front logos or big text.
 """,
     "placement_dna": """
 TEXTURE PLACEMENT DNA:
@@ -171,18 +150,14 @@ TEXTURE PLACEMENT DNA:
 - Texture follows folds smoothly; avoid loud patches or harsh edges.
 """,
     "colors": {
-      "default": """
-COLOR RULE:
-- Keep fabric black; lunar texture is subtle monochrome.
-- Do not brighten into grey; preserve premium dark look.
-"""
+      "default": "COLOR RULE: keep fabric black; lunar texture is subtle monochrome; do not brighten into grey."
     },
     "prints": {
       "default": """
 TEXTURE DNA (LUNAR):
 - Subtle moon crater / lunar surface texture embedded into the fabric.
 - Low contrast, premium, futuristic, minimal.
-- Should look like a high-end textile print, not a sticker.
+- Looks like a high-end textile print, not a sticker.
 """
     }
   }
