@@ -132,8 +132,6 @@ PRIMARY TASK:
 
 {GLOBAL_QUALITY}
 
-{LOGO_RULES}
-
 GARMENT SPEC:
 {garment_dna}
 
