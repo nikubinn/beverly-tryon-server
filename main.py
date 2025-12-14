@@ -16,6 +16,7 @@ from telegram.ext import (
     CommandHandler,
     ContextTypes,
     MessageHandler,
+    PicklePersistence,
     filters,
 )
 
@@ -24,7 +25,7 @@ from google import genai
 from google.genai import types
 
 # Prompt blocks (TEXT ONLY)
-from prompts import GLOBAL_CONSTRAINTS, GLOBAL_QUALITY, PRODUCT_PROMPTS
+from prompts import GLOBAL_CONSTRAINTS, GLOBAL_QUALITY, GLOBAL_LOGO_RULES, PRODUCT_PROMPTS
 
 
 # =========================
@@ -32,7 +33,12 @@ from prompts import GLOBAL_CONSTRAINTS, GLOBAL_QUALITY, PRODUCT_PROMPTS
 # =========================
 _lock_fh = None
 
+
 def acquire_single_instance_lock():
+    """
+    Helps when a single machine accidentally starts 2 processes.
+    NOTE: It can't prevent conflicts across different hosts/containers.
+    """
     global _lock_fh
     _lock_fh = open("/tmp/telegram_polling.lock", "w")
     try:
@@ -55,7 +61,6 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 
 # ONLY Gemini 3 Pro (no fallback)
 GEMINI_MODEL = os.getenv("GEMINI_IMAGE_MODEL", "gemini-3-pro-image-preview").strip()
-
 IMAGE_SIZE_POLICY = "2K"
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -65,6 +70,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger("beverly-tryon-bot")
 
+# Persistence (so the bot doesn't forget user's photo after deploy/restart)
+PERSIST_PATH = "/tmp/ptb_persistence.pickle"
 
 # =========================
 # State keys
@@ -73,6 +80,7 @@ K_USER_PHOTO = "user_photo_path"
 K_TSHIRT = "sel_tshirt"
 K_COLOR = "sel_color"
 K_PRINT = "sel_print"
+K_USER_PHOTO_TS = "user_photo_ts"
 
 CB_TSHIRT = "tshirt:"
 CB_COLOR = "color:"
@@ -132,6 +140,8 @@ PRIMARY TASK:
 
 {GLOBAL_QUALITY}
 
+{GLOBAL_LOGO_RULES}
+
 GARMENT SPEC:
 {garment_dna}
 
@@ -143,11 +153,6 @@ COLOR SPEC:
 
 PRINT SPEC:
 {print_rule}
-
-LOGO RULE:
-- Place the provided logo ONLY in the background as a small physical sign.
-- Subtle violet glow. Slightly out of focus.
-- DO NOT put the logo on the T-shirt.
 
 OUTPUT RESOLUTION POLICY:
 - Generate ONE image.
@@ -203,6 +208,22 @@ def gemini_tryon_sync(
     raise RuntimeError("Gemini returned no image bytes (text-only response)")
 
 
+def _save_user_photo_path(context: ContextTypes.DEFAULT_TYPE, user_id: int, path: Path):
+    context.user_data[K_USER_PHOTO] = str(path)
+    context.user_data[K_USER_PHOTO_TS] = int(time.time())
+    reset_flow(context)
+
+
+def _get_user_photo_path(context: ContextTypes.DEFAULT_TYPE) -> Path | None:
+    p = context.user_data.get(K_USER_PHOTO)
+    if not p:
+        return None
+    try:
+        return Path(p)
+    except Exception:
+        return None
+
+
 # =========================
 # Bot handlers
 # =========================
@@ -211,19 +232,40 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Привет! Пришли своё фото — выберем футболку, цвет и принт.")
 
 
-async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.photo:
+async def on_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Accepts:
+    - normal Telegram photos
+    - images sent as documents
+    """
+    if not update.message:
         return
 
-    photo = update.message.photo[-1]
-    file = await photo.get_file()
+    file = None
+    suffix = ".jpg"
+
+    if update.message.photo:
+        photo = update.message.photo[-1]
+        file = await photo.get_file()
+        suffix = ".jpg"
+    elif update.message.document and update.message.document.mime_type and update.message.document.mime_type.startswith("image/"):
+        file = await update.message.document.get_file()
+        # infer suffix a bit
+        mt = update.message.document.mime_type
+        if mt.endswith("png"):
+            suffix = ".png"
+        else:
+            suffix = ".jpg"
+    else:
+        return
 
     tmp = Path(tempfile.gettempdir())
-    user_path = tmp / f"beverly_user_{update.effective_user.id}.jpg"
+    user_id = update.effective_user.id if update.effective_user else int(time.time())
+    user_path = tmp / f"beverly_user_{user_id}_{int(time.time())}{suffix}"
+
     await file.download_to_drive(custom_path=str(user_path))
 
-    context.user_data[K_USER_PHOTO] = str(user_path)
-    reset_flow(context)
+    _save_user_photo_path(context, user_id, user_path)
 
     catalog = context.bot_data["catalog"]
     kb = build_keyboard(
@@ -236,8 +278,11 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    if not query:
+        return
+
     await query.answer()
-    data = query.data
+    data = query.data or ""
     catalog = context.bot_data["catalog"]
 
     if data == CB_RESTART:
@@ -246,8 +291,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Ок, заново. Выбери футболку:", reply_markup=kb)
         return
 
-    user_photo = context.user_data.get(K_USER_PHOTO)
-    if not user_photo:
+    user_photo_path = _get_user_photo_path(context)
+    if not user_photo_path or not user_photo_path.exists():
+        reset_flow(context)
         await query.edit_message_text("Сначала пришли фото 📸")
         return
 
@@ -276,6 +322,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pr = data[len(CB_PRINT):]
         tshirt = context.user_data.get(K_TSHIRT)
         color = context.user_data.get(K_COLOR)
+
         if not tshirt or not color:
             await query.edit_message_text("Сначала выбери футболку и цвет.")
             return
@@ -284,29 +331,26 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         asset_path = BASE_DIR / catalog[tshirt][color][pr]
-        user_photo_path = Path(user_photo)
 
         if not LOGO_PATH.exists():
-            await query.edit_message_text("logo.png не найден в assets/. Добавь logo.png.")
+            await query.edit_message_text("logo.png не найден в assets/. Добавь assets/logo.png.")
             return
 
         await query.edit_message_text(f"Генерирую (2K, {GEMINI_MODEL})…")
 
         try:
-            loop = asyncio.get_running_loop()
-            out_bytes, model_used = await loop.run_in_executor(
-                None,
-                lambda: gemini_tryon_sync(
-                    user_photo=user_photo_path,
-                    asset_path=asset_path,
-                    logo_path=LOGO_PATH,
-                    tshirt=tshirt,
-                    color=color,
-                    pr=pr,
-                )
+            # run blocking Gemini call in a thread
+            out_bytes, model_used = await asyncio.to_thread(
+                gemini_tryon_sync,
+                user_photo_path,
+                asset_path,
+                LOGO_PATH,
+                tshirt,
+                color,
+                pr,
             )
 
-            with tempfile.NamedTemporaryFile(suffix=".jpg") as f:
+            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=True) as f:
                 f.write(out_bytes)
                 f.flush()
                 await context.bot.send_photo(
@@ -325,6 +369,18 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text("Неизвестная команда. Нажми /start и попробуй снова.")
 
 
+async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.exception("Unhandled error: %s", context.error)
+
+
+async def post_init(app):
+    # Ensure we are in polling mode (not webhook) and clear pending updates
+    try:
+        await app.bot.delete_webhook(drop_pending_updates=True)
+    except Exception as e:
+        logger.warning("delete_webhook failed: %s", e)
+
+
 def main():
     acquire_single_instance_lock()
 
@@ -335,20 +391,33 @@ def main():
 
     catalog = load_catalog()
 
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    persistence = PicklePersistence(filepath=PERSIST_PATH)
+
+    app = (
+        ApplicationBuilder()
+        .token(TELEGRAM_TOKEN)
+        .persistence(persistence)
+        .post_init(post_init)
+        .build()
+    )
+
     app.bot_data["catalog"] = catalog
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.PHOTO, on_photo))
+
+    # Accept both photos and image-documents
+    app.add_handler(MessageHandler(filters.PHOTO, on_image))
+    app.add_handler(MessageHandler(filters.Document.IMAGE, on_image))
+
     app.add_handler(CallbackQueryHandler(on_callback))
+
+    app.add_error_handler(on_error)
 
     logger.info("Bot started (Background Worker, polling)")
     logger.info("Gemini model=%s | policy=%s", GEMINI_MODEL, IMAGE_SIZE_POLICY)
 
-    # IMPORTANT: ensure polling mode and clear pending webhook/updates
-    app.bot.delete_webhook(drop_pending_updates=True)
-
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    # drop_pending_updates here too (extra safety)
+    app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
