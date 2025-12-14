@@ -107,8 +107,9 @@ def _mime_for_path(p: Path) -> str:
     return "image/png" if p.suffix.lower() == ".png" else "image/jpeg"
 
 
+# ✅ FIX: keyword-only args for google-genai==0.7.0
 def _part_from_path(p: Path) -> types.Part:
-    return types.Part.from_bytes(p.read_bytes(), mime_type=_mime_for_path(p))
+    return types.Part.from_bytes(data=p.read_bytes(), mime_type=_mime_for_path(p))
 
 
 def build_tryon_prompt(tshirt: str, color: str, pr: str) -> str:
@@ -355,7 +356,8 @@ def main():
     app.add_handler(CallbackQueryHandler(on_callback))
 
     logger.info("Bot started (Background Worker, polling)")
-    logger.info("Gemini primary=%s | fallback=%s | policy=%s", GEMINI_PRIMARY_MODEL, GEMINI_FALLBACK_MODEL, IMAGE_SIZE_POLICY)
+    logger.info("Gemini primary=%s | fallback=%s | policy=%s",
+                GEMINI_PRIMARY_MODEL, GEMINI_FALLBACK_MODEL, IMAGE_SIZE_POLICY)
 
     # guarantee polling mode and clear pending updates
     app.bot.delete_webhook(drop_pending_updates=True)
