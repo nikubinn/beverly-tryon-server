@@ -9,8 +9,6 @@ import asyncio
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
-from PIL import Image
-
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -83,7 +81,7 @@ COLOR_LABELS = {
 
 RESTART_LABEL = "[ ↻ ЗАНОВО ]"
 
-TEXT_PHOTO_OK = "ага 🟣✅\n[ ВЫБЕРИ ФУТБОЛКУ ]"
+TEXT_PHOTO_OK = "ага 🟣\n[ ВЫБЕРИ ФУТБОЛКУ ]"
 TEXT_PICK_COLOR = "[ ВЫБЕРИ ЦВЕТ ]"
 TEXT_PICK_PRINT = "[ ВЫБЕРИ ПРИНТ ]"
 TEXT_TRYON = "идёт примерка 👽"
@@ -94,9 +92,6 @@ TEXT_DONE = "готово 🦇"
 # STATE KEYS
 # =========================
 K_USER_PHOTO = "user_photo_path"
-K_ORIG_W = "orig_w"
-K_ORIG_H = "orig_h"
-
 K_TSHIRT = "sel_tshirt"
 K_COLOR = "sel_color"
 K_PRINT = "sel_print"
@@ -158,26 +153,17 @@ def _label_color(c: str) -> str:
 
 
 # =========================
-# PROMPT BUILDER (NO LOGO) + HARD CANVAS LOCK
+# PROMPT BUILDER (NO ASPECT CONSTRAINTS)
 # =========================
-def build_tryon_prompt(tshirt: str, color: str, pr: str, orig_w: int, orig_h: int) -> str:
+def build_tryon_prompt(tshirt: str, color: str, pr: str) -> str:
     product = PRODUCT_PROMPTS.get(tshirt, {})
-    ratio = (orig_w / orig_h) if orig_h else 0.0
-
     return f"""
 You will edit the FIRST image (the person photo).
 
 PRIMARY TASK:
 - Replace ONLY the T-shirt on the person using the SECOND image as the exact reference.
 - Match color, print placement, scale, and orientation exactly.
-- Keep EVERYTHING else pixel-identical (background, face, hands, phone, tattoos, lighting).
-
-CANVAS LOCK (STRICT, NO EXCEPTIONS):
-- Output MUST keep the same canvas size and aspect ratio as the FIRST image.
-- Do NOT crop, zoom, square, extend borders, add margins, add frames, or reframe.
-- Output pixel dimensions must be EXACTLY: {orig_w} x {orig_h}.
-- Aspect ratio must be EXACTLY: {ratio:.6f}.
-- If you are unsure, preserve the FIRST image framing and canvas unchanged.
+- Keep everything else unchanged.
 
 {GLOBAL_CONSTRAINTS}
 {GLOBAL_QUALITY}
@@ -195,8 +181,8 @@ PRINT SPEC:
 {product.get("prints", {}).get(pr, "")}
 
 OUTPUT:
-- Generate ONE image only.
-- Keep the same size as input ({orig_w}x{orig_h}).
+- Generate ONE image.
+- Target ~2048px longest side (2K class).
 """.strip()
 
 
@@ -209,12 +195,10 @@ def gemini_tryon_sync(
     tshirt: str,
     color: str,
     pr: str,
-    orig_w: int,
-    orig_h: int,
 ) -> Tuple[bytes, str]:
 
     client = genai.Client(api_key=GEMINI_API_KEY)
-    prompt = build_tryon_prompt(tshirt, color, pr, orig_w, orig_h)
+    prompt = build_tryon_prompt(tshirt, color, pr)
 
     parts = [
         prompt,
@@ -222,7 +206,7 @@ def gemini_tryon_sync(
         _part_from_path(asset_path),
     ]
 
-    logger.info("Gemini START | model=%s | input=%sx%s", GEMINI_MODEL, orig_w, orig_h)
+    logger.info("Gemini START | model=%s", GEMINI_MODEL)
     t0 = time.time()
     resp = client.models.generate_content(model=GEMINI_MODEL, contents=parts)
     logger.info("Gemini END | %.2fs", time.time() - t0)
@@ -251,16 +235,6 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tmp = Path(tempfile.gettempdir())
     user_path = tmp / f"user_{update.effective_user.id}.jpg"
     await file.download_to_drive(custom_path=str(user_path))
-
-    # store original size for strict prompt constraints
-    try:
-        with Image.open(user_path) as im:
-            w, h = im.size
-        context.user_data[K_ORIG_W] = int(w)
-        context.user_data[K_ORIG_H] = int(h)
-    except Exception:
-        context.user_data[K_ORIG_W] = 0
-        context.user_data[K_ORIG_H] = 0
 
     context.user_data[K_USER_PHOTO] = str(user_path)
     reset_flow(context)
@@ -351,18 +325,14 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         context.user_data[K_PRINT] = pr
-
         await query.edit_message_text(TEXT_TRYON)
 
         asset_path = BASE_DIR / catalog[tshirt][color][pr]
         user_photo_path = Path(user_photo)
 
-        orig_w = int(context.user_data.get(K_ORIG_W, 0) or 0)
-        orig_h = int(context.user_data.get(K_ORIG_H, 0) or 0)
-
         try:
             loop = asyncio.get_running_loop()
-            out_bytes, model_used = await loop.run_in_executor(
+            out_bytes, _model_used = await loop.run_in_executor(
                 None,
                 lambda: gemini_tryon_sync(
                     user_photo=user_photo_path,
@@ -370,8 +340,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     tshirt=tshirt,
                     color=color,
                     pr=pr,
-                    orig_w=orig_w,
-                    orig_h=orig_h,
                 )
             )
 
