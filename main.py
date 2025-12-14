@@ -66,7 +66,16 @@ logger = logging.getLogger("beverly-tryon-bot")
 # =========================
 # UI LABELS / DISPLAY MAPS
 # =========================
-TSHIRT_LABELS = {
+# Buttons (short) — WITHOUT "T-SHIRT" to fit
+TSHIRT_BUTTON_LABELS = {
+    "alien_drip_t_shirt": "[ ALIEN DRIP ]",
+    "moon_walk_t_shirt": "[ MOON WALK ]",
+    "pink_swaga_t_shirt": "[ PINK SWAGA ]",
+    "pocket_t_shirt": "[ POCKET ]",
+}
+
+# Result (full) — keep full names
+TSHIRT_RESULT_LABELS = {
     "alien_drip_t_shirt": "[ ALIEN DRIP T-SHIRT ]",
     "moon_walk_t_shirt": "[ MOON WALK T-SHIRT ]",
     "pink_swaga_t_shirt": "[ PINK SWAGA T-SHIRT ]",
@@ -81,7 +90,7 @@ COLOR_LABELS = {
 
 RESTART_LABEL = "[ ↻ ЗАНОВО ]"
 
-TEXT_PHOTO_OK = "ага 🟣\n[ ВЫБЕРИ ФУТБОЛКУ ]"
+TEXT_PHOTO_OK = "ага\n[ ВЫБЕРИ ФУТБОЛКУ ]"
 TEXT_PICK_COLOR = "[ ВЫБЕРИ ЦВЕТ ]"
 TEXT_PICK_PRINT = "[ ВЫБЕРИ ПРИНТ ]"
 TEXT_TRYON = "идёт примерка 👽"
@@ -144,12 +153,16 @@ def _label_print(pr: str) -> str:
     return f"[ {str(pr).replace('_', ' ').upper()} ]"
 
 
-def _label_tshirt(t: str) -> str:
-    return TSHIRT_LABELS.get(t, f"[ {str(t).replace('_', ' ').upper()} ]")
-
-
 def _label_color(c: str) -> str:
     return COLOR_LABELS.get(c, f"[ {str(c).replace('_', ' ').upper()} ]")
+
+
+def _label_tshirt_button(t: str) -> str:
+    return TSHIRT_BUTTON_LABELS.get(t, f"[ {str(t).replace('_', ' ').upper()} ]")
+
+
+def _label_tshirt_result(t: str) -> str:
+    return TSHIRT_RESULT_LABELS.get(t, f"[ {str(t).replace('_', ' ').upper()} ]")
 
 
 # =========================
@@ -245,7 +258,7 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = build_keyboard(
         tshirts,
         CB_TSHIRT,
-        label_map={k: _label_tshirt(k) for k in tshirts},
+        label_map={k: _label_tshirt_button(k) for k in tshirts},
         extra_buttons=[[InlineKeyboardButton(RESTART_LABEL, callback_data=CB_RESTART)]],
     )
 
@@ -264,7 +277,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kb = build_keyboard(
             tshirts,
             CB_TSHIRT,
-            label_map={k: _label_tshirt(k) for k in tshirts},
+            label_map={k: _label_tshirt_button(k) for k in tshirts},
             extra_buttons=[[InlineKeyboardButton(RESTART_LABEL, callback_data=CB_RESTART)]],
         )
         await query.edit_message_text(TEXT_PHOTO_OK, reply_markup=kb)
@@ -345,7 +358,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             caption = (
                 f"{TEXT_DONE}\n"
-                f"{_label_tshirt(tshirt)}\n"
+                f"{_label_tshirt_result(tshirt)}\n"
                 f"{_label_color(color)}\n"
                 f"{_label_print(pr)}"
             )
