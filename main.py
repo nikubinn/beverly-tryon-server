@@ -6,8 +6,11 @@ import time
 import atexit
 import fcntl
 import asyncio
+import io
 from pathlib import Path
 from typing import Any, Dict, Tuple
+
+from PIL import Image
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -67,6 +70,8 @@ logger = logging.getLogger("beverly-tryon-bot")
 # STATE KEYS
 # =========================
 K_USER_PHOTO = "user_photo_path"
+K_ORIG_SIZE = "orig_size"  # (W, H)
+
 K_TSHIRT = "sel_tshirt"
 K_COLOR = "sel_color"
 K_PRINT = "sel_print"
@@ -114,8 +119,27 @@ def _part_from_path(p: Path) -> types.Part:
     )
 
 
+def cover_crop_to_size(img: Image.Image, target_size: tuple[int, int]) -> Image.Image:
+    """
+    Без рамок: сохраняем пропорции (без растяжения), но заполняем весь target,
+    обрезая лишнее по краям (COVER + center crop).
+    """
+    target_w, target_h = target_size
+    src_w, src_h = img.size
+
+    scale = max(target_w / src_w, target_h / src_h)  # COVER
+    new_w = int(src_w * scale)
+    new_h = int(src_h * scale)
+
+    img = img.resize((new_w, new_h), Image.LANCZOS)
+
+    left = (new_w - target_w) // 2
+    top = (new_h - target_h) // 2
+    return img.crop((left, top, left + target_w, top + target_h))
+
+
 # =========================
-# PROMPT BUILDER
+# PROMPT BUILDER (NO LOGO)
 # =========================
 def build_tryon_prompt(tshirt: str, color: str, pr: str) -> str:
     product = PRODUCT_PROMPTS.get(tshirt, {})
@@ -198,6 +222,13 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_path = tmp / f"user_{update.effective_user.id}.jpg"
     await file.download_to_drive(custom_path=str(user_path))
 
+    # Save original size (W, H) so we can return same aspect ratio w/o рамок
+    try:
+        with Image.open(user_path) as im:
+            context.user_data[K_ORIG_SIZE] = im.size
+    except Exception:
+        context.user_data.pop(K_ORIG_SIZE, None)
+
     context.user_data[K_USER_PHOTO] = str(user_path)
     reset_flow(context)
 
@@ -259,14 +290,28 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ),
         )
 
-        with tempfile.NamedTemporaryFile(suffix=".jpg") as f:
-            f.write(out_bytes)
-            f.flush()
-            await context.bot.send_photo(
-                chat_id=update.effective_chat.id,
-                photo=f.name,
-                caption=f"Готово ✅\n{model_used} | 2K",
-            )
+        # Crop to original aspect ratio/size WITHOUT borders
+        orig_size = context.user_data.get(K_ORIG_SIZE)
+        if orig_size:
+            img = Image.open(io.BytesIO(out_bytes)).convert("RGB")
+            img = cover_crop_to_size(img, orig_size)
+            with tempfile.NamedTemporaryFile(suffix=".jpg") as f:
+                img.save(f.name, format="JPEG", quality=95, subsampling=0)
+                await context.bot.send_photo(
+                    chat_id=update.effective_chat.id,
+                    photo=f.name,
+                    caption=f"Готово ✅\n{model_used} | 2K | crop",
+                )
+        else:
+            # Fallback: send as-is
+            with tempfile.NamedTemporaryFile(suffix=".jpg") as f:
+                f.write(out_bytes)
+                f.flush()
+                await context.bot.send_photo(
+                    chat_id=update.effective_chat.id,
+                    photo=f.name,
+                    caption=f"Готово ✅\n{model_used} | 2K",
+                )
 
 
 # =========================
