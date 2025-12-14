@@ -6,11 +6,8 @@ import time
 import atexit
 import fcntl
 import asyncio
-import io
 from pathlib import Path
 from typing import Any, Dict, Tuple
-
-from PIL import Image
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -30,9 +27,9 @@ from google.genai import types
 from prompts import GLOBAL_CONSTRAINTS, GLOBAL_QUALITY, PRODUCT_PROMPTS
 
 
-# =====================================================
-# SINGLE INSTANCE LOCK (prevents double polling)
-# =====================================================
+# =========================
+# SINGLE INSTANCE LOCK
+# =========================
 _lock_fh = None
 
 def acquire_single_instance_lock():
@@ -45,9 +42,9 @@ def acquire_single_instance_lock():
     atexit.register(lambda: _lock_fh.close())
 
 
-# =====================================================
+# =========================
 # PATHS & CONFIG
-# =====================================================
+# =========================
 BASE_DIR = Path(__file__).resolve().parent
 ASSETS_DIR = BASE_DIR / "assets"
 CATALOG_PATH = ASSETS_DIR / "catalog.json"
@@ -66,11 +63,10 @@ logging.basicConfig(
 logger = logging.getLogger("beverly-tryon-bot")
 
 
-# =====================================================
+# =========================
 # STATE KEYS
-# =====================================================
+# =========================
 K_USER_PHOTO = "user_photo_path"
-K_ORIG_SIZE = "orig_size"
 K_TSHIRT = "sel_tshirt"
 K_COLOR = "sel_color"
 K_PRINT = "sel_print"
@@ -81,9 +77,9 @@ CB_PRINT = "print:"
 CB_RESTART = "restart"
 
 
-# =====================================================
+# =========================
 # HELPERS
-# =====================================================
+# =========================
 def load_catalog() -> Dict[str, Any]:
     if not CATALOG_PATH.exists():
         raise FileNotFoundError(f"catalog.json not found: {CATALOG_PATH}")
@@ -118,30 +114,9 @@ def _part_from_path(p: Path) -> types.Part:
     )
 
 
-# =====================================================
-# ASPECT RATIO PRESERVATION (LETTERBOX)
-# =====================================================
-def preserve_aspect_ratio(img: Image.Image, target_size: tuple[int, int], bg=(0, 0, 0)):
-    target_w, target_h = target_size
-    src_w, src_h = img.size
-
-    scale = min(target_w / src_w, target_h / src_h)
-    new_w = int(src_w * scale)
-    new_h = int(src_h * scale)
-
-    img = img.resize((new_w, new_h), Image.LANCZOS)
-
-    canvas = Image.new("RGB", (target_w, target_h), bg)
-    canvas.paste(
-        img,
-        ((target_w - new_w) // 2, (target_h - new_h) // 2)
-    )
-    return canvas
-
-
-# =====================================================
-# PROMPT BUILDER (NO LOGO)
-# =====================================================
+# =========================
+# PROMPT BUILDER
+# =========================
 def build_tryon_prompt(tshirt: str, color: str, pr: str) -> str:
     product = PRODUCT_PROMPTS.get(tshirt, {})
     return f"""
@@ -149,12 +124,8 @@ You will edit the FIRST image (the person photo).
 
 PRIMARY TASK:
 - Replace ONLY the T-shirt on the person using the SECOND image as reference.
-- Match color, print placement, scale, and orientation exactly.
+- Match color, print placement, scale, orientation exactly.
 - Keep everything else unchanged.
-
-STRICT FRAMING RULE:
-- Preserve original camera framing and aspect ratio.
-- Do NOT crop, zoom, square, or reframe.
 
 {GLOBAL_CONSTRAINTS}
 {GLOBAL_QUALITY}
@@ -172,14 +143,14 @@ PRINT SPEC:
 {product.get("prints", {}).get(pr, "")}
 
 OUTPUT:
-- Generate ONE image
+- ONE image
 - ~2048px longest side (2K)
 """.strip()
 
 
-# =====================================================
-# GEMINI GENERATION (SYNC)
-# =====================================================
+# =========================
+# GEMINI SYNC GENERATION
+# =========================
 def gemini_tryon_sync(
     user_photo: Path,
     asset_path: Path,
@@ -211,9 +182,9 @@ def gemini_tryon_sync(
     raise RuntimeError("Gemini returned no image data")
 
 
-# =====================================================
+# =========================
 # BOT HANDLERS
-# =====================================================
+# =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reset_flow(context)
     await update.message.reply_text("Пришли фото — выберем футболку 👕")
@@ -227,10 +198,7 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_path = tmp / f"user_{update.effective_user.id}.jpg"
     await file.download_to_drive(custom_path=str(user_path))
 
-    img = Image.open(user_path)
-    context.user_data[K_ORIG_SIZE] = img.size
     context.user_data[K_USER_PHOTO] = str(user_path)
-
     reset_flow(context)
 
     catalog = context.bot_data["catalog"]
@@ -260,17 +228,16 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data.startswith(CB_TSHIRT):
-        context.user_data[K_TSHIRT] = data[len(CB_TSHIRT):]
-        kb = build_keyboard(sorted(catalog[context.user_data[K_TSHIRT]].keys()), CB_COLOR)
+        tshirt = data[len(CB_TSHIRT):]
+        context.user_data[K_TSHIRT] = tshirt
+        kb = build_keyboard(sorted(catalog[tshirt].keys()), CB_COLOR)
         await query.edit_message_text("Выбери цвет:", reply_markup=kb)
         return
 
     if data.startswith(CB_COLOR):
-        context.user_data[K_COLOR] = data[len(CB_COLOR):]
-        kb = build_keyboard(
-            sorted(catalog[context.user_data[K_TSHIRT]][context.user_data[K_COLOR]].keys()),
-            CB_PRINT,
-        )
+        color = data[len(CB_COLOR):]
+        context.user_data[K_COLOR] = color
+        kb = build_keyboard(sorted(catalog[context.user_data[K_TSHIRT]][color].keys()), CB_PRINT)
         await query.edit_message_text("Выбери принт:", reply_markup=kb)
         return
 
@@ -292,23 +259,19 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ),
         )
 
-        gen_img = Image.open(io.BytesIO(out_bytes)).convert("RGB")
-        orig_size = context.user_data.get(K_ORIG_SIZE)
-        if orig_size:
-            gen_img = preserve_aspect_ratio(gen_img, orig_size)
-
         with tempfile.NamedTemporaryFile(suffix=".jpg") as f:
-            gen_img.save(f.name, quality=95, subsampling=0)
+            f.write(out_bytes)
+            f.flush()
             await context.bot.send_photo(
                 chat_id=update.effective_chat.id,
                 photo=f.name,
-                caption=f"Готово ✅ | {model_used} | пропорции сохранены",
+                caption=f"Готово ✅\n{model_used} | 2K",
             )
 
 
-# =====================================================
+# =========================
 # MAIN
-# =====================================================
+# =========================
 def main():
     acquire_single_instance_lock()
 
