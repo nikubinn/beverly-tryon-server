@@ -17,15 +17,6 @@ QUALITY TARGET:
 - Crisp print edges, no blur, no melting, no double printing.
 - Print follows fabric folds subtly (only mild warping from real drape), never floating.
 """
-LOGO_RULES = """
-LOGO (THIRD IMAGE) — PHYSICAL INTEGRATION RULES:
-- Use the provided logo ONLY as a real, physical background element.
-- The logo must be ATTACHED to an existing surface in the scene (never floating in air).
-- Pick the most natural placement automatically based on the environment:
-  • indoor: small wall plaque, subtle backlit sign on a wall/pillar, tiny sticker on a glass panel, discreet brand plate near a doorway
-  • outdoor: small facade sign, street-style plate, subtle neon sign mounted on a wall, sticker on a window/door
-- Respect perspective and depth: correct scale, angle, distance, and occlusion if objects partially cover it.
-- Make it feel “installed”: add believable mounting cues (thin frame, screws, bracket, adhesive edge) when appropriate.
 
 STYLE:
 - Keep it small and secondary (do not dominate the frame).
