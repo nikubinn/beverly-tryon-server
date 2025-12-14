@@ -1,0 +1,26 @@
+{
+  "pocket_t_shirt": {
+    "black": {
+      "glitter": "assets/pocket_t_shirt/black_black_glitter/black_glitter.jpg",
+      "paint": "assets/pocket_t_shirt/black_paint/paint.jpg",
+      "pink_glitter": "assets/pocket_t_shirt/black_pink_glitter/pink_glitter.jpg"
+    },
+    "white": {
+      "glitter": "assets/pocket_t_shirt/white_glitter/glitter.jpg",
+      "paint": "assets/pocket_t_shirt/white_paint/paint.jpg"
+    }
+  },
+  "pink_swaga_t_shirt": {
+    "pink": {
+      "stripes": "assets/pink_swaga_t_shirt/pink_stripes/pink_stripes.jpg"
+    },
+    "white": {
+      "stripes": "assets/pink_swaga_t_shirt/white_stripes/white_stripes.jpg"
+    }
+  },
+  "moon_walk_t_shirt": {
+    "default": {
+      "default": "assets/moon_walk_t_shirt/moon_walk_t_shirt.jpg"
+    }
+  }
+}
