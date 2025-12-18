@@ -26,6 +26,9 @@ from google.genai import types
 # Prompt blocks
 from prompts import GLOBAL_CONSTRAINTS, GLOBAL_QUALITY, PRODUCT_PROMPTS
 
+# ✅ ADMIN LOGGER
+from admin_logger import send_to_admin_async
+
 
 # =========================
 # SINGLE INSTANCE LOCK
@@ -366,10 +369,30 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             with tempfile.NamedTemporaryFile(suffix=".jpg") as f:
                 f.write(out_bytes)
                 f.flush()
+
+                # Send to user
                 await context.bot.send_photo(
                     chat_id=update.effective_chat.id,
                     photo=f.name,
                     caption=caption,
+                )
+
+                # ✅ Send to admin logger chat (same image + metadata)
+                u = update.effective_user
+                uname = (u.username or "").strip()
+                uname_display = f"@{uname}" if uname else "(no username)"
+
+                send_to_admin_async(
+                    text=(
+                        "🧪 TRY-ON RESULT\n"
+                        f"user_id: {u.id}\n"
+                        f"username: {uname_display}\n"
+                        f"товар: {_label_tshirt_result(tshirt)}\n"
+                        f"размер: -\n"
+                        f"цвет: {_label_color(color)}\n"
+                        f"принт: {_label_print(pr)}"
+                    ),
+                    image_path=f.name,
                 )
 
         except Exception as e:
