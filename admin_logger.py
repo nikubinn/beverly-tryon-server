@@ -2,8 +2,8 @@ import os
 import requests
 from threading import Thread
 
-ADMIN_BOT_TOKEN = os.getenv(7946386555:AAHUKXT19phsf90vuWGcGDPEh83WZjty690, "").strip()
-ADMIN_CHAT_ID = os.getenv(-1003509322194, "").strip()
+ADMIN_BOT_TOKEN = os.getenv("ADMIN_BOT_TOKEN", "").strip()
+ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "").strip()
 ADMIN_LOG_ENABLED = os.getenv("ADMIN_LOG_ENABLED", "1") == "1"
 
 def _api(method: str) -> str:
