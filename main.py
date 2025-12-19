@@ -66,6 +66,7 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
 logger = logging.getLogger("beverly-tryon-bot")
+BUILD_MARKER = "pinklock-aspect-v2-2025-12-19"
 
 
 # =========================
@@ -177,14 +178,12 @@ def _pick_aspect_ratio_for_user_photo(user_photo: Path) -> str:
         with Image.open(user_photo) as im:
             w, h = im.size
     except Exception:
-        # If we can't read size for any reason, don't force aspect ratio.
         return ""
 
     # Square-ish
     if w > 0 and h > 0 and abs(w - h) / max(w, h) < 0.08:
         return "1:1"
 
-    # Portrait vs landscape
     return "9:16" if h > w else "16:9"
 
 
@@ -194,14 +193,15 @@ def _pick_aspect_ratio_for_user_photo(user_photo: Path) -> str:
 def build_tryon_prompt(tshirt: str, color: str, pr: str) -> str:
     product = PRODUCT_PROMPTS.get(tshirt, {})
 
+    color_l = str(color).lower()
     pink_lock = ""
-    if str(color).lower() == "pink":
+    if "pink" in color_l:
         pink_lock = """
 PINK COLOR LOCK (CRITICAL):
-- The garment fabric MUST remain clearly pink.
-- Never output white, off-white, beige, gray, or desaturated fabric instead of pink.
-- Do NOT neutralize or wash out pink under any lighting.
-- If the scene lighting is bright, keep pink saturation strong so it reads unmistakably pink.
+- The garment fabric MUST remain clearly PINK.
+- Never output white, off-white, beige, gray, or any neutral color instead of pink.
+- Do NOT neutralize, desaturate, or wash out pink under any lighting.
+- If you are unsure, prefer pink (not white).
 """.strip()
 
     return f"""
@@ -216,6 +216,7 @@ PRIMARY TASK:
 
 REFERENCE PRIORITY (CRITICAL):
 - The SECOND image (garment reference) is the single source of truth for fabric color, print colors, texture, and pattern.
+- Match garment color by visual sampling from the reference image.
 - Do NOT reinterpret the garment color based on the person photo or scene lighting.
 - If anything conflicts, the garment reference image ALWAYS wins.
 
@@ -247,7 +248,7 @@ PRINT SPEC:
 OUTPUT:
 - Generate ONE image.
 - Output MUST have exactly the same pixel dimensions and aspect ratio as the first image.
-- Target ~2048px longest side (2K class) WITHOUT changing the original canvas.
+- 2K class output is OK, but DO NOT change the original canvas framing.
 """.strip()
 
 
@@ -274,9 +275,8 @@ def gemini_tryon_sync(
     logger.info("Gemini START | model=%s", GEMINI_MODEL)
     t0 = time.time()
     aspect = _pick_aspect_ratio_for_user_photo(user_photo)
+    logger.info("Gemini aspect hint=%s (from user photo)", aspect if aspect else "none")
 
-    # Try to force output aspect ratio to match the user's photo.
-    # If the installed SDK doesn't support this config, fall back gracefully.
     try:
         cfg = types.GenerateContentConfig(
             image_config=types.ImageConfig(
@@ -285,7 +285,9 @@ def gemini_tryon_sync(
             )
         )
         resp = client.models.generate_content(model=GEMINI_MODEL, contents=parts, config=cfg)
-    except Exception:
+        logger.info("Gemini config applied (aspect hint)")
+    except Exception as e:
+        logger.warning("Gemini config NOT applied, fallback to default generate_content(): %s", e)
         resp = client.models.generate_content(model=GEMINI_MODEL, contents=parts)
     logger.info("Gemini END | %.2fs", time.time() - t0)
 
@@ -406,6 +408,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(TEXT_TRYON)
 
         asset_path = BASE_DIR / catalog[tshirt][color][pr]
+        logger.info("Selected | user=%s (@%s) | tshirt=%s | color=%s | print=%s | asset=%s", update.effective_user.id, update.effective_user.username, tshirt, color, pr, asset_path)
         user_photo_path = Path(user_photo)
 
         try:
@@ -486,7 +489,7 @@ def main():
     app.add_handler(MessageHandler(filters.PHOTO, on_photo))
     app.add_handler(CallbackQueryHandler(on_callback))
 
-    logger.info("Bot started (polling)")
+    logger.info("Bot started (polling) | BUILD=%s", BUILD_MARKER)
     logger.info("Gemini model=%s | policy=%s", GEMINI_MODEL, IMAGE_SIZE_POLICY)
 
     app.run_polling(
