@@ -9,7 +9,7 @@ import asyncio
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
-from PIL import Image
+from PIL import Image  # (можно оставить, но aspect_ratio больше не используем)
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -39,9 +39,8 @@ _lock_fh = None
 
 def acquire_single_instance_lock():
     """
-    NOTE:
-    - This lock only protects within the same container filesystem.
-    - With Render Webhook mode, duplicate getUpdates conflicts are gone anyway.
+    На Render (webhook) это обычно не нужно, но оставляем как есть.
+    Если вдруг будет второй процесс — мы его зарежем.
     """
     global _lock_fh
     _lock_fh = open("/tmp/telegram_polling.lock", "w")
@@ -71,6 +70,8 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
 logger = logging.getLogger("beverly-tryon-bot")
+
+# метка сборки — чтобы понимать, что задеплоилось
 BUILD_MARKER = "v4a-webhook-admin-bytes-2025-12-19-aspect-off"
 
 
@@ -176,21 +177,6 @@ def _label_tshirt_result(t: str) -> str:
     return TSHIRT_RESULT_LABELS.get(t, f"[ {str(t).replace('_', ' ').upper()} ]")
 
 
-def _pick_aspect_ratio_for_user_photo(user_photo: Path) -> str:
-    """(Left for debugging; NOT used for Gemini config anymore.)"""
-    try:
-        with Image.open(user_photo) as im:
-            w, h = im.size
-    except Exception:
-        return ""
-
-    # Square-ish
-    if w > 0 and h > 0 and abs(w - h) / max(w, h) < 0.08:
-        return "1:1"
-
-    return "9:16" if h > w else "16:9"
-
-
 # =========================
 # PROMPT BUILDER (NO ASPECT CONSTRAINTS)
 # =========================
@@ -285,20 +271,15 @@ def gemini_tryon_sync(
     logger.info("Gemini START | model=%s", GEMINI_MODEL)
     t0 = time.time()
 
-    # NOTE: We intentionally do NOT pass aspect_ratio anymore.
-    # This prevents forcing 9:16 / 16:9 and lets the model keep the user's photo framing.
-    try:
-        cfg = types.GenerateContentConfig(
-            image_config=types.ImageConfig(
-                image_size=IMAGE_SIZE_POLICY,
-            )
+    # ✅ ВАЖНО:
+    # Не передаем aspect_ratio — чтобы НЕ форсить 9:16/16:9 и чтобы размер/кадр взялся с фото юзера.
+    cfg = types.GenerateContentConfig(
+        image_config=types.ImageConfig(
+            image_size=IMAGE_SIZE_POLICY,  # "2K"
         )
-        resp = client.models.generate_content(model=GEMINI_MODEL, contents=parts, config=cfg)
-        logger.info("Gemini config applied (no aspect override)")
-    except Exception as e:
-        logger.warning("Gemini config NOT applied, fallback to default generate_content(): %s", e)
-        resp = client.models.generate_content(model=GEMINI_MODEL, contents=parts)
+    )
 
+    resp = client.models.generate_content(model=GEMINI_MODEL, contents=parts, config=cfg)
     logger.info("Gemini END | %.2fs", time.time() - t0)
 
     cand = resp.candidates[0]
@@ -449,36 +430,31 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"{_label_print(pr)}"
             )
 
-            with tempfile.NamedTemporaryFile(suffix=".jpg") as f:
-                f.write(out_bytes)
-                f.flush()
+            # Send to user (bytes напрямую)
+            await context.bot.send_photo(
+                chat_id=update.effective_chat.id,
+                photo=out_bytes,
+                caption=caption,
+            )
 
-                # Send to user
-                await context.bot.send_photo(
-                    chat_id=update.effective_chat.id,
-                    photo=f.name,
-                    caption=caption,
-                )
+            # ✅ Send to admin logger chat (same image + metadata) — FIX: image_bytes (не image_path)
+            u = update.effective_user
+            uname = (u.username or "").strip()
+            uname_display = f"@{uname}" if uname else "(no username)"
 
-                # ✅ Send to admin logger chat (same image + metadata)
-                u = update.effective_user
-                uname = (u.username or "").strip()
-                uname_display = f"@{uname}" if uname else "(no username)"
-
-                # ✅ FIX: send bytes directly (no image_path)
-                send_to_admin_async(
-                    text=(
-                        "🧪 TRY-ON RESULT\n"
-                        f"user_id: {u.id}\n"
-                        f"username: {uname_display}\n"
-                        f"товар: {_label_tshirt_result(tshirt)}\n"
-                        f"размер: -\n"
-                        f"цвет: {_label_color(color)}\n"
-                        f"принт: {_label_print(pr)}"
-                    ),
-                    image_bytes=out_bytes,
-                    filename="result.jpg",
-                )
+            send_to_admin_async(
+                text=(
+                    "🧪 TRY-ON RESULT\n"
+                    f"user_id: {u.id}\n"
+                    f"username: {uname_display}\n"
+                    f"товар: {_label_tshirt_result(tshirt)}\n"
+                    f"размер: -\n"
+                    f"цвет: {_label_color(color)}\n"
+                    f"принт: {_label_print(pr)}"
+                ),
+                image_bytes=out_bytes,
+                filename="result.jpg",
+            )
 
         except Exception as e:
             logger.exception("Generation failed")
@@ -499,7 +475,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================
-# MAIN (WEBHOOK for Render)
+# MAIN (WEBHOOK)
 # =========================
 def main():
     acquire_single_instance_lock()
@@ -508,6 +484,16 @@ def main():
         raise RuntimeError("TELEGRAM_TOKEN missing")
     if not GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY missing")
+
+    # Render прокидывает URL и PORT в Web Service
+    render_url = os.getenv("RENDER_EXTERNAL_URL", "").strip().rstrip("/")
+    port = int(os.getenv("PORT", "10000"))
+
+    if not render_url:
+        raise RuntimeError("RENDER_EXTERNAL_URL missing (Render Web Service expected)")
+
+    webhook_path = f"/webhook/{TELEGRAM_TOKEN}"
+    webhook_url = f"{render_url}{webhook_path}"
 
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.bot_data["catalog"] = load_catalog()
@@ -518,23 +504,15 @@ def main():
 
     logger.info("Bot started (webhook) | BUILD=%s", BUILD_MARKER)
     logger.info("Gemini model=%s | policy=%s", GEMINI_MODEL, IMAGE_SIZE_POLICY)
-
-    # Render Web Service provides these:
-    port = int(os.environ.get("PORT", "10000"))
-    external_url = os.environ.get("RENDER_EXTERNAL_URL", "").strip()
-    if not external_url:
-        raise RuntimeError("RENDER_EXTERNAL_URL missing. Use a Render Web Service (not Background Worker).")
-
-    # Secret-ish path to reduce random hits
-    url_path = f"webhook/{TELEGRAM_TOKEN}"
-    webhook_url = f"{external_url}/{url_path}"
+    logger.info("Webhook URL=%s", webhook_url)
 
     app.run_webhook(
         listen="0.0.0.0",
         port=port,
-        url_path=url_path,
+        url_path=webhook_path.lstrip("/"),
         webhook_url=webhook_url,
         drop_pending_updates=True,
+        allowed_updates=Update.ALL_TYPES,
     )
 
 
