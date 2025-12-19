@@ -453,6 +453,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 uname = (u.username or "").strip()
                 uname_display = f"@{uname}" if uname else "(no username)"
 
+                # ✅ FIX: send bytes directly (no image_path)
                 send_to_admin_async(
                     text=(
                         "🧪 TRY-ON RESULT\n"
@@ -463,7 +464,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         f"цвет: {_label_color(color)}\n"
                         f"принт: {_label_print(pr)}"
                     ),
-                    image_path=f.name,
+                    image_bytes=out_bytes,
+                    filename="result.jpg",
                 )
 
         except Exception as e:
