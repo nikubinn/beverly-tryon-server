@@ -66,7 +66,7 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
 logger = logging.getLogger("beverly-tryon-bot")
-BUILD_MARKER = "pinklock-aspect-v2-2025-12-19"
+BUILD_MARKER = "v4-anchor-aspect-2025-12-19"
 
 
 # =========================
@@ -209,6 +209,11 @@ This is an image EDIT task, not image generation.
 
 You will edit the FIRST image (the person photo).
 
+MULTI-IMAGE RULE (CRITICAL):
+- Edit ONLY the FIRST image.
+- The LAST image is provided ONLY to lock canvas size and aspect ratio.
+- Do NOT copy content from the last image.
+
 PRIMARY TASK:
 - Replace ONLY the T-shirt on the person using the SECOND image as the exact reference.
 - Match color, print placement, scale, and orientation exactly.
@@ -268,8 +273,9 @@ def gemini_tryon_sync(
 
     parts = [
         prompt,
-        _part_from_path(user_photo),
-        _part_from_path(asset_path),
+        _part_from_path(user_photo),   # TARGET: edit this image
+        _part_from_path(asset_path),   # REFERENCE: garment
+        _part_from_path(user_photo),   # ANCHOR: lock canvas/aspect
     ]
 
     logger.info("Gemini START | model=%s", GEMINI_MODEL)
