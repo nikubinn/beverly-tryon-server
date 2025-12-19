@@ -38,6 +38,11 @@ from admin_logger import send_to_admin_async
 _lock_fh = None
 
 def acquire_single_instance_lock():
+    """
+    NOTE:
+    - This lock only protects within the same container filesystem.
+    - With Render Webhook mode, duplicate getUpdates conflicts are gone anyway.
+    """
     global _lock_fh
     _lock_fh = open("/tmp/telegram_polling.lock", "w")
     try:
@@ -66,7 +71,7 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
 logger = logging.getLogger("beverly-tryon-bot")
-BUILD_MARKER = "v4a-admin-bytes-2025-12-19-aspect-off"
+BUILD_MARKER = "v4a-webhook-admin-bytes-2025-12-19-aspect-off"
 
 
 # =========================
@@ -179,8 +184,10 @@ def _pick_aspect_ratio_for_user_photo(user_photo: Path) -> str:
     except Exception:
         return ""
 
+    # Square-ish
     if w > 0 and h > 0 and abs(w - h) / max(w, h) < 0.08:
         return "1:1"
+
     return "9:16" if h > w else "16:9"
 
 
@@ -492,7 +499,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================
-# MAIN
+# MAIN (WEBHOOK for Render)
 # =========================
 def main():
     acquire_single_instance_lock()
@@ -509,12 +516,25 @@ def main():
     app.add_handler(MessageHandler(filters.PHOTO, on_photo))
     app.add_handler(CallbackQueryHandler(on_callback))
 
-    logger.info("Bot started (polling) | BUILD=%s", BUILD_MARKER)
+    logger.info("Bot started (webhook) | BUILD=%s", BUILD_MARKER)
     logger.info("Gemini model=%s | policy=%s", GEMINI_MODEL, IMAGE_SIZE_POLICY)
 
-    app.run_polling(
+    # Render Web Service provides these:
+    port = int(os.environ.get("PORT", "10000"))
+    external_url = os.environ.get("RENDER_EXTERNAL_URL", "").strip()
+    if not external_url:
+        raise RuntimeError("RENDER_EXTERNAL_URL missing. Use a Render Web Service (not Background Worker).")
+
+    # Secret-ish path to reduce random hits
+    url_path = f"webhook/{TELEGRAM_TOKEN}"
+    webhook_url = f"{external_url}/{url_path}"
+
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=port,
+        url_path=url_path,
+        webhook_url=webhook_url,
         drop_pending_updates=True,
-        allowed_updates=Update.ALL_TYPES,
     )
 
 
