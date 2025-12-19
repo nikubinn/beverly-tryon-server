@@ -66,7 +66,7 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
 logger = logging.getLogger("beverly-tryon-bot")
-BUILD_MARKER = "v4a-admin-bytes-2025-12-19"
+BUILD_MARKER = "v4a-admin-bytes-2025-12-19-aspect-off"
 
 
 # =========================
@@ -171,19 +171,16 @@ def _label_tshirt_result(t: str) -> str:
     return TSHIRT_RESULT_LABELS.get(t, f"[ {str(t).replace('_', ' ').upper()} ]")
 
 
-
 def _pick_aspect_ratio_for_user_photo(user_photo: Path) -> str:
-    """Return a supported aspect ratio string based on the user's photo orientation."""
+    """(Left for debugging; NOT used for Gemini config anymore.)"""
     try:
         with Image.open(user_photo) as im:
             w, h = im.size
     except Exception:
         return ""
 
-    # Square-ish
     if w > 0 and h > 0 and abs(w - h) / max(w, h) < 0.08:
         return "1:1"
-
     return "9:16" if h > w else "16:9"
 
 
@@ -280,21 +277,21 @@ def gemini_tryon_sync(
 
     logger.info("Gemini START | model=%s", GEMINI_MODEL)
     t0 = time.time()
-    aspect = _pick_aspect_ratio_for_user_photo(user_photo)
-    logger.info("Gemini aspect hint=%s (from user photo)", aspect if aspect else "none")
 
+    # NOTE: We intentionally do NOT pass aspect_ratio anymore.
+    # This prevents forcing 9:16 / 16:9 and lets the model keep the user's photo framing.
     try:
         cfg = types.GenerateContentConfig(
             image_config=types.ImageConfig(
-                aspect_ratio=aspect if aspect else None,
                 image_size=IMAGE_SIZE_POLICY,
             )
         )
         resp = client.models.generate_content(model=GEMINI_MODEL, contents=parts, config=cfg)
-        logger.info("Gemini config applied (aspect hint)")
+        logger.info("Gemini config applied (no aspect override)")
     except Exception as e:
         logger.warning("Gemini config NOT applied, fallback to default generate_content(): %s", e)
         resp = client.models.generate_content(model=GEMINI_MODEL, contents=parts)
+
     logger.info("Gemini END | %.2fs", time.time() - t0)
 
     cand = resp.candidates[0]
@@ -414,7 +411,15 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(TEXT_TRYON)
 
         asset_path = BASE_DIR / catalog[tshirt][color][pr]
-        logger.info("Selected | user=%s (@%s) | tshirt=%s | color=%s | print=%s | asset=%s", update.effective_user.id, update.effective_user.username, tshirt, color, pr, asset_path)
+        logger.info(
+            "Selected | user=%s (@%s) | tshirt=%s | color=%s | print=%s | asset=%s",
+            update.effective_user.id,
+            update.effective_user.username,
+            tshirt,
+            color,
+            pr,
+            asset_path,
+        )
         user_photo_path = Path(user_photo)
 
         try:
