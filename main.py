@@ -8,8 +8,9 @@ import fcntl
 import asyncio
 from pathlib import Path
 from typing import Any, Dict, Tuple
+from collections import defaultdict
 
-from PIL import Image  # (можно оставить, но aspect_ratio больше не используем)
+from PIL import Image, ImageOps  # ✅ EXIF normalize
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -52,6 +53,12 @@ def acquire_single_instance_lock():
 
 
 # =========================
+# PER-USER GENERATION LOCKS
+# =========================
+USER_LOCKS: Dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
+
+
+# =========================
 # PATHS & CONFIG
 # =========================
 BASE_DIR = Path(__file__).resolve().parent
@@ -72,7 +79,7 @@ logging.basicConfig(
 logger = logging.getLogger("beverly-tryon-bot")
 
 # метка сборки — чтобы понимать, что задеплоилось
-BUILD_MARKER = "v4a-webhook-admin-bytes-2025-12-19-aspect-off"
+BUILD_MARKER = "v4a-webhook-admin-bytes-2025-12-19-aspect-off-lock-exif-uniquephoto"
 
 
 # =========================
@@ -271,8 +278,7 @@ def gemini_tryon_sync(
     logger.info("Gemini START | model=%s", GEMINI_MODEL)
     t0 = time.time()
 
-    # ✅ ВАЖНО:
-    # Не передаем aspect_ratio — чтобы НЕ форсить 9:16/16:9 и чтобы размер/кадр взялся с фото юзера.
+    # ✅ ВАЖНО: не передаем aspect_ratio
     cfg = types.GenerateContentConfig(
         image_config=types.ImageConfig(
             image_size=IMAGE_SIZE_POLICY,  # "2K"
@@ -304,8 +310,22 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file = await photo.get_file()
 
     tmp = Path(tempfile.gettempdir())
-    user_path = tmp / f"user_{update.effective_user.id}.jpg"
+
+    # ✅ Unique filename per upload (prevents overwriting and cross-run mixing)
+    u = update.effective_user
+    mid = update.message.message_id
+    user_path = tmp / f"user_{u.id}_{mid}.jpg"
+
     await file.download_to_drive(custom_path=str(user_path))
+
+    # ✅ Normalize EXIF orientation (fixes random portrait/landscape issues)
+    try:
+        with Image.open(user_path) as im:
+            im = ImageOps.exif_transpose(im)
+            im = im.convert("RGB")
+            im.save(user_path, format="JPEG", quality=95)
+    except Exception:
+        pass
 
     context.user_data[K_USER_PHOTO] = str(user_path)
     reset_flow(context)
@@ -410,66 +430,69 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         user_photo_path = Path(user_photo)
 
-        try:
-            loop = asyncio.get_running_loop()
-            out_bytes, _model_used = await loop.run_in_executor(
-                None,
-                lambda: gemini_tryon_sync(
-                    user_photo=user_photo_path,
-                    asset_path=asset_path,
-                    tshirt=tshirt,
-                    color=color,
-                    pr=pr,
+        # ✅ lock per user to prevent overlapping generations / cross-mix
+        lock = USER_LOCKS[update.effective_user.id]
+        async with lock:
+            try:
+                loop = asyncio.get_running_loop()
+                out_bytes, _model_used = await loop.run_in_executor(
+                    None,
+                    lambda: gemini_tryon_sync(
+                        user_photo=user_photo_path,
+                        asset_path=asset_path,
+                        tshirt=tshirt,
+                        color=color,
+                        pr=pr,
+                    )
                 )
-            )
 
-            caption = (
-                f"{TEXT_DONE}\n"
-                f"{_label_tshirt_result(tshirt)}\n"
-                f"{_label_color(color)}\n"
-                f"{_label_print(pr)}"
-            )
-
-            # Send to user (bytes напрямую)
-            await context.bot.send_photo(
-                chat_id=update.effective_chat.id,
-                photo=out_bytes,
-                caption=caption,
-            )
-
-            # ✅ Send to admin logger chat (same image + metadata) — FIX: image_bytes (не image_path)
-            u = update.effective_user
-            uname = (u.username or "").strip()
-            uname_display = f"@{uname}" if uname else "(no username)"
-
-            send_to_admin_async(
-                text=(
-                    "🧪 TRY-ON RESULT\n"
-                    f"user_id: {u.id}\n"
-                    f"username: {uname_display}\n"
-                    f"товар: {_label_tshirt_result(tshirt)}\n"
-                    f"размер: -\n"
-                    f"цвет: {_label_color(color)}\n"
-                    f"принт: {_label_print(pr)}"
-                ),
-                image_bytes=out_bytes,
-                filename="result.jpg",
-            )
-
-        except Exception as e:
-            logger.exception("Generation failed")
-            send_to_admin_async(
-                text=(
-                    f"GEN ERROR | @{update.effective_user.username or 'no_username'} | id={update.effective_user.id}\n"
-                    f"tshirt={tshirt} color={color} print={pr}\n"
-                    f"{e}"
+                caption = (
+                    f"{TEXT_DONE}\n"
+                    f"{_label_tshirt_result(tshirt)}\n"
+                    f"{_label_color(color)}\n"
+                    f"{_label_print(pr)}"
                 )
-            )
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text=f"Ошибка генерации: {e}",
-            )
-        return
+
+                # Send to user (bytes напрямую)
+                await context.bot.send_photo(
+                    chat_id=update.effective_chat.id,
+                    photo=out_bytes,
+                    caption=caption,
+                )
+
+                # ✅ Send to admin logger chat (same image + metadata) — image_bytes
+                u = update.effective_user
+                uname = (u.username or "").strip()
+                uname_display = f"@{uname}" if uname else "(no username)"
+
+                send_to_admin_async(
+                    text=(
+                        "🧪 TRY-ON RESULT\n"
+                        f"user_id: {u.id}\n"
+                        f"username: {uname_display}\n"
+                        f"товар: {_label_tshirt_result(tshirt)}\n"
+                        f"размер: -\n"
+                        f"цвет: {_label_color(color)}\n"
+                        f"принт: {_label_print(pr)}"
+                    ),
+                    image_bytes=out_bytes,
+                    filename="result.jpg",
+                )
+
+            except Exception as e:
+                logger.exception("Generation failed")
+                send_to_admin_async(
+                    text=(
+                        f"GEN ERROR | @{update.effective_user.username or 'no_username'} | id={update.effective_user.id}\n"
+                        f"tshirt={tshirt} color={color} print={pr}\n"
+                        f"{e}"
+                    )
+                )
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text=f"Ошибка генерации: {e}",
+                )
+            return
 
     await query.edit_message_text("Неизвестная команда. Нажми /start и попробуй снова.")
 
