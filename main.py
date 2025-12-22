@@ -9,6 +9,7 @@ import asyncio
 from pathlib import Path
 from typing import Any, Dict, Tuple
 from collections import defaultdict
+from zoneinfo import ZoneInfo
 
 from PIL import Image, ImageOps  # ✅ EXIF normalize
 
@@ -31,6 +32,85 @@ from prompts import GLOBAL_CONSTRAINTS, GLOBAL_QUALITY, PRODUCT_PROMPTS
 
 # ✅ ADMIN LOGGER
 from admin_logger import send_to_admin_async
+
+
+# =========================
+# OPTIONAL: REDIS (RATE LIMIT)
+# =========================
+try:
+    import redis  # type: ignore
+except Exception:
+    redis = None
+
+MINSK_TZ = ZoneInfo("Europe/Minsk")
+DAILY_LIMIT = int(os.getenv("DAILY_LIMIT_PER_USER", "4").strip() or "4")
+REDIS_URL = os.getenv("REDIS_URL", "").strip()
+
+_redis_client = None
+
+# Fallback in-memory counters (if Redis not configured)
+_mem_counts: Dict[str, int] = defaultdict(int)
+_mem_lock = asyncio.Lock()
+
+
+def _get_minsk_day_key() -> str:
+    # YYYYMMDD in Minsk time
+    now = time.time()
+    dt = __import__("datetime").datetime.fromtimestamp(now, tz=MINSK_TZ)
+    return dt.strftime("%Y%m%d")
+
+
+def _seconds_until_next_minsk_midnight() -> int:
+    import datetime as _dt
+    now = _dt.datetime.now(tz=MINSK_TZ)
+    tomorrow = (now + _dt.timedelta(days=1)).date()
+    next_midnight = _dt.datetime.combine(tomorrow, _dt.time(0, 0, 0), tzinfo=MINSK_TZ)
+    ttl = int((next_midnight - now).total_seconds())
+    return max(ttl, 1)
+
+
+def get_redis_client():
+    global _redis_client
+    if _redis_client is not None:
+        return _redis_client
+    if not REDIS_URL or redis is None:
+        _redis_client = None
+        return None
+    try:
+        # decode_responses=False -> bytes/int are fine; we only use INCR/EXPIRE
+        _redis_client = redis.Redis.from_url(REDIS_URL, decode_responses=False)
+        _redis_client.ping()
+        return _redis_client
+    except Exception:
+        _redis_client = None
+        return None
+
+
+async def consume_daily_quota(user_id: int) -> Tuple[bool, int, int]:
+    """
+    Returns:
+      allowed(bool), used(int), remaining(int)
+    """
+    day = _get_minsk_day_key()
+    key = f"tryon:quota:{user_id}:{day}"
+    ttl = _seconds_until_next_minsk_midnight()
+
+    r = get_redis_client()
+    if r is not None:
+        # Atomic-ish enough for this use case:
+        # INCR key; if first time -> set TTL to Minsk midnight
+        used = int(r.incr(key))
+        if used == 1:
+            r.expire(key, ttl)
+        remaining = max(0, DAILY_LIMIT - used)
+        return (used <= DAILY_LIMIT, used, remaining)
+
+    # Fallback (in-memory; resets on restart)
+    async with _mem_lock:
+        used = _mem_counts[key] + 1
+        _mem_counts[key] = used
+    remaining = max(0, DAILY_LIMIT - used)
+    return (used <= DAILY_LIMIT, used, remaining)
 
 
 # =========================
@@ -415,18 +495,31 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("Не понял принт. Попробуй ещё раз.")
             return
 
+        # ✅ DAILY LIMIT CHECK (Minsk day 00:00–23:59)
+        allowed, used, remaining = await consume_daily_quota(update.effective_user.id)
+        if not allowed:
+            await query.edit_message_text(
+                f"Лимит на сегодня исчерпан 👽\n"
+                f"[ {DAILY_LIMIT} ГЕНЕРАЦИИ / СУТКИ ]\n"
+                f"Сутки считаются по Минску (00:00–23:59).\n"
+                f"Попробуй завтра."
+            )
+            return
+
         context.user_data[K_PRINT] = pr
         await query.edit_message_text(TEXT_TRYON)
 
         asset_path = BASE_DIR / catalog[tshirt][color][pr]
         logger.info(
-            "Selected | user=%s (@%s) | tshirt=%s | color=%s | print=%s | asset=%s",
+            "Selected | user=%s (@%s) | tshirt=%s | color=%s | print=%s | asset=%s | daily_used=%s | daily_left=%s",
             update.effective_user.id,
             update.effective_user.username,
             tshirt,
             color,
             pr,
             asset_path,
+            used,
+            remaining,
         )
         user_photo_path = Path(user_photo)
 
@@ -450,7 +543,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"{TEXT_DONE}\n"
                     f"{_label_tshirt_result(tshirt)}\n"
                     f"{_label_color(color)}\n"
-                    f"{_label_print(pr)}"
+                    f"{_label_print(pr)}\n"
+                    f"[ осталось сегодня: {remaining} / {DAILY_LIMIT} ]"
                 )
 
                 # Send to user (bytes напрямую)
@@ -473,7 +567,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         f"товар: {_label_tshirt_result(tshirt)}\n"
                         f"размер: -\n"
                         f"цвет: {_label_color(color)}\n"
-                        f"принт: {_label_print(pr)}"
+                        f"принт: {_label_print(pr)}\n"
+                        f"daily_used: {used}\n"
+                        f"daily_left: {remaining}"
                     ),
                     image_bytes=out_bytes,
                     filename="result.jpg",
@@ -525,9 +621,17 @@ def main():
     app.add_handler(MessageHandler(filters.PHOTO, on_photo))
     app.add_handler(CallbackQueryHandler(on_callback))
 
+    # init redis early (optional)
+    r = get_redis_client()
+    if r is None:
+        logger.warning("Redis not configured; using in-memory daily limits (reset on restart).")
+    else:
+        logger.info("Redis connected; daily limits persistent.")
+
     logger.info("Bot started (webhook) | BUILD=%s", BUILD_MARKER)
     logger.info("Gemini model=%s | policy=%s", GEMINI_MODEL, IMAGE_SIZE_POLICY)
     logger.info("Webhook URL=%s", webhook_url)
+    logger.info("Daily limit=%s per user | Minsk day 00:00–23:59", DAILY_LIMIT)
 
     app.run_webhook(
         listen="0.0.0.0",
