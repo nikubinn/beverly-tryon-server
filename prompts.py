@@ -66,9 +66,13 @@ GARMENT DNA:
         "placement_dna": """
 PRINT PLACEMENT DNA:
 - Main alien-eyes graphic centered on the chest.
-- Large statement size, not touching the collar.
-- Perfect left/right symmetry.
-- Exact proportions from the reference image.
+- LARGE statement size: the graphic should occupy ~70–85% of the visible front panel width between side seams.
+- The top of the graphic sits below the collar: keep a clear gap (~2–4 cm / ~1–2 in) from the neckline seam (do NOT touch the collar).
+- The bottom drips should reach into the mid-torso area (upper half of the shirt), but MUST NOT go below the belly/waistline.
+- Perfect left/right symmetry and centered alignment.
+- Match the reference image SCALE first: if unsure, always choose BIGGER (never shrink).
+- Do not miniaturize the graphic due to folds — it must read bold from a normal phone distance.
+
 """,
         "colors": {
             "black": "COLOR RULE: deep black fabric, preserve natural highlights in folds.",
@@ -79,16 +83,24 @@ PRINT PLACEMENT DNA:
             "paint": """
 PRINT DNA (PAINT):
 - Two alien-eye shapes with dripping trails.
-- Matte paint texture, organic but controlled edges.
-- Drips match reference direction and length.
-- High contrast, premium finish.
+- Exact silhouette and proportions as in the reference (no redesign).
+- Maintain BIG scale: do NOT shrink the graphic. If uncertain, scale UP slightly.
+- The distance between the two eyes matches the reference; keep them wide and dominant.
+- Drips match reference direction and length (no extra drips, no missing drips).
+- Crisp edges, high contrast, premium finish.
+- Print follows fabric folds only subtly (mild warping), but remains large and readable.
+
 """,
             "glitter": """
 PRINT DNA (GLITTER):
 - Two alien-eye shapes with dripping trails.
-- Dense metallic glitter texture.
-- Controlled sparkle, no grainy noise.
-- Drips remain sharp and readable.
+- Exact silhouette and proportions as in the reference (no redesign).
+- Maintain BIG scale: do NOT shrink the graphic. If uncertain, scale UP slightly.
+- Dense metallic glitter texture (as in the reference).
+- Controlled sparkle: no grainy noise, no random glitter specks outside the graphic.
+- Drips remain sharp and readable; keep the drip lengths matching the reference.
+- Crisp edges; print follows fabric folds subtly but stays bold and large.
+
 """
         }
     },
